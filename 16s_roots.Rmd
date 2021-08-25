@@ -11,8 +11,10 @@ editor_options:
 knitr::opts_chunk$set(echo=FALSE, warning=FALSE, message=FALSE)
 ```
 
+### General Comment - Objects in this file contain the name 'otu' however they represent ASV in this case.
+
 ```{r Input Data and subset}
-#We already have imported the otu file and taxonomy file from mothur to this R project/environment. We just need to import the metadata for roots niche and subset the data accordingly.
+#We already have imported the otu file and taxonomy file from DADA2 to this R project/environment. We just need to import the metadata for roots niche and subset the data accordingly.
 roots_metadata <- read.table("/Users/beantkapoor/OneDrive - University of Tennessee/Dogwood Microbiome Project/Data Analysis/16s_all/metadata/16s_roots.txt", header = TRUE, fill = TRUE, strip.white = TRUE)
 roots_sample_names <- roots_metadata$Sample
 
