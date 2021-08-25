@@ -6,7 +6,7 @@ output: html_document
 editor_options: 
   chunk_output_type: console
 ---
-### General Comment - Objects in this file contain the name 'otu' however they represent ASV in this case becuase these are ITS sequences.
+### General Comment - Objects in this file contain the name 'otu' however they represent ASV in this case.
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
