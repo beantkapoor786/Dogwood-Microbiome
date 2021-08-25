@@ -7,6 +7,8 @@ editor_options:
   chunk_output_type: console
 ---
 
+### General Comment - Objects in this file contain the name 'otu' however they represent ASV in this case.
+
 ```{r Import Data and Subset}
 #So we will be working with two dataframes 'seqtab_nochim' which is our ASV count table and 'taxa' which is our taxonomy table. First of all we have to make sure that column names in seqtab_nochim dataframe align correctly with the rownames of taxa dataframe.
 dim(seqtab_nochim) #There are 218 rows (samples) and 13205 columns (ASVs)
