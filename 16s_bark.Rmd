@@ -7,12 +7,14 @@ editor_options:
   chunk_output_type: console
 ---
 
+### General Comment - Objects in this file contain the name 'otu' however they represent ASV in this case.
+
 ```{r global_options, include=FALSE}
 knitr::opts_chunk$set(echo=FALSE, warning=FALSE, message=FALSE)
 ```
 
 ```{r Input Data and Subset}
-#We already have imported the otu file and taxonomy file from mothur to this R project/environment. We just need to import the metadata for bark niche and subset the data accordingly.
+#We already have imported the otu file and taxonomy file from DADA2 to this R project/environment. We just need to import the metadata for bark niche and subset the data accordingly.
 bark_metadata <- read.table("/Users/beantkapoor/OneDrive - University of Tennessee/Dogwood Microbiome Project/Data Analysis/16s_all/metadata/16s_bark.txt", header = TRUE, fill = TRUE, strip.white = TRUE)
 bark_sample_names <- bark_metadata$Sample
 
