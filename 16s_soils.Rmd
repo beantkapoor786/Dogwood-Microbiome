@@ -7,11 +7,13 @@ editor_options:
   chunk_output_type: console
 ---
 
+### General Comment - Objects in this file contain the name 'otu' however they represent ASV in this case.
+
 ```{r global_options, include=FALSE}
 knitr::opts_chunk$set(echo=FALSE, warning=FALSE, message=FALSE)
 ```
 
-# The purpose of this code chunk is to find out the number of total sequences and OTUs without the fruit samples. This is going to be in the Bacterial Sequence Processing section in the Results.
+# The purpose of this code chunk is to find out the number of total sequences and ASVs without the fruit samples. This is going to be in the Bacterial Sequence Processing section in the Results.
 
 ```{r}
 library(ggplot2)
