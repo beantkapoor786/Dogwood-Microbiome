@@ -1,0 +1,2738 @@
+---
+title: "dogwood_statistical_analyses"
+author: "Aaron Onufrak"
+date: "3/23/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+The following details the code used to statistically analyze 16S and ITS ASV tables generated using the dada2 pipeline. 
+
+## Load Packages 
+
+Loading all of the packages necessary to run the following statistical analyses. 
+
+```{r}
+library(vegan)
+library(ggplot2)
+library(ape)
+library(nlme)
+library(emmeans)
+library(hillR)
+library(ggpubr)
+library(factoextra)
+library(corrplot)
+library(readr)
+library(tidyverse)
+library(compositions)
+library(DESeq2)
+library(tidyr)
+library(indicspecies)
+library(dplyr)
+library(plyr)
+library(car)
+library(rstatix)
+library(stringr)
+```
+
+## Load Metadata
+
+Loading metadata that describes the treatment type, plot, and niche of each sample. 
+
+```{r}
+# Importing the original metadata.
+metadata_burn<-read.table("/Volumes/Beant_Kapoor/sequence_processing/raw_sequence_data_bac_dwdmcb/postburn_metadata_allniches.txt",sep='\t',header=TRUE)
+
+# Adding ITS to sample names to differentiate between 16S and ITS samples down the road. 
+metadata_burn$Sample<-paste(metadata_burn$Sample,"ITS",sep='')
+
+# Importing original metadata but under 16S object. 
+metadata_burn_16s<-read.table("/Volumes/Beant_Kapoor/sequence_processing/raw_sequence_data_bac_dwdmcb/postburn_metadata_allniches.txt",sep='\t',header=TRUE)
+
+# Adding 16S to sample names to differentiate between 16S and ITS samples down the road. 
+metadata_burn_16s$Sample<-paste(metadata_burn_16s$Sample,"16S",sep='')
+```
+
+##  Functions
+
+### Rarefy Formatting
+Function is used to format rarefied data. Takes two user supplied variables. 
+
+rarefied_table: The rarefied ASV table that has been rarefied using rrarefy function from vegan. 
+
+sample: Sequencing depth per sample. For example, if samples rarefied to 1000 sequences then sample is set to 1000. 
+```{r}
+
+rarefy_formatting<-function(rarefied_table,sample){
+  # creates an object rarefied that contains only those samples that have grater than or equal to the rarefaction cut-off. 
+  rarefied<-as.data.frame(subset(rarefied_table, rowSums(rarefied_table)>=sample))
+  # removes ASVs that have no reads after rarefaction. 
+  rare.asv<-rarefied[,colSums(rarefied)>0]
+  return(rare.asv)
+}
+```
+
+###  PCoA Generator
+Function is used to generate Principal Coordinate Analyses (PCoA) using three user supplied variables.
+
+table: Rarefied ASV table
+
+method: Method used to calculate distances for distance matrix using the vegdist function from vegan. 
+
+color: Metadata variable to color points and ellipses. 
+
+shape: Metadata variable used to determine shape points. 
+```{r}
+
+pcoa_imager<-function(table,method,color,shape=NULL){
+  # using the decostand function from vegan to convert count data to relative abundances
+  relabund.asv<-decostand(table, method="total")
+  # calculating distance matrix using the vegdist function from vegan. Method is a user specified variable to indicate which method for computing distance to be used. 
+  dist.asv<-vegdist(relabund.asv, method=method)
+  # using the pcoa function from ape to perform a PCoA with the distance matrix stored in dist.asv. 
+  pcoa.asv<-pcoa(dist.asv)
+  # creating a dataframe that only includes the vectors from the PCoA. 
+  pcoavec.asv<-as.data.frame(pcoa.asv$vectors)
+  # creating a datatable that is only the first and second PCs. 
+  pcoasitescores.asv<-data.frame(PC1=pcoavec.asv$Axis.1, PC2=pcoavec.asv$Axis.2)
+  # creating a if/else statement based on presence of shaping variable. 
+      if (is.null(shape)){
+      pcoagraph.asv<-data.frame(pcoasitescores.asv,PC1=pcoasitescores.asv$PC1, PC2=pcoasitescores.asv$PC2, color=color)
+    } else {
+  pcoagraph.asv<-data.frame(pcoasitescores.asv,PC1=pcoasitescores.asv$PC1, PC2=pcoasitescores.asv$PC2, color=color, shape_var=shape)}
+  # generates standard deviation ellipses based on color variable
+  pcoaellipse<-ordiellipse(pcoasitescores.asv,pcoagraph.asv$color, display="sites", kind="sd", draw="none")
+  ell <- data.frame()
+for(g in levels(as.factor(pcoagraph.asv$color))){
+ell <- rbind(ell, cbind(as.data.frame(with(pcoagraph.asv[pcoagraph.asv$color==g,],                                                vegan:::veganCovEllipse(pcoaellipse[[g]]$cov,pcoaellipse[[g]]$center,pcoaellipse[[g]]$scale))) ,color=g))}
+  # plots pcoa in ggplot
+  ggplot(pcoagraph.asv, aes(PC1,PC2, colour=color))+
+    (if (is.null(shape)){
+      geom_point(size=3.5)
+    } else {
+  geom_point(aes(shape=shape_var), size=3.5)})+
+  geom_path(data=ell, aes(x=PC1, y=PC2, colour=color),size=0.5, linetype=1)+
+ theme(axis.title.x=element_text(size=14, face="bold"))+
+  theme(axis.title.y=element_text(size=14, face="bold"))+
+  theme(axis.text.x=element_text(size=12, face="bold"))+
+  theme(axis.text.y=element_text(size=12, face="bold"))+ 
+  scale_shape_manual(values=c(16,10,8,7,0,2))+
+  theme(panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+    panel.border=element_rect(colour="black", size=1, fill=NA))+
+  theme(panel.grid.major=element_blank(),
+       panel.grid.minor=element_blank(),
+       panel.background = element_blank(),
+  panel.border=element_rect(color="black", size=1, fill=NA))
+}
+```
+
+### Taxonomy Formatting
+
+
+```{r}
+taxonomy_formatting<-function(rare.asvtab,taxonomytab){
+  t.rareasv<-as.data.frame(t(rare.asvtab))
+filtered.tax<-as.data.frame(subset(taxonomytab,row.names(taxonomytab) %in% row.names(t.rareasv)))
+  t.rareasv.tax<-merge(t.rareasv,filtered.tax, by="row.names")
+  return(t.rareasv.tax)
+}
+```
+
+# Alpha Diversity
+
+Calculating alpha diversity metrics below. Analyses are run for all plant niches and soils. 
+
+## ITS Hill Numbers Plant
+
+Calculating alpha diversity for fungal communities in all plant niches. 
+
+```{r}
+# Importing rarefied fungal ASV table. 
+rare.asv.tab.its.2019.plant<-read.table("/Volumes/Beant_Kapoor/sequence_processing/raw_sequence_data_its_dwdmcb/rarefied_asv_tables_its/rare.asv.tab.its.2019.plant.txt",header=TRUE,sep='\t')
+
+# Using the rarefy_formatting function to remove samples that did not have at least 4000 sequences. 
+rareasv.its.2019.plant<-rarefy_formatting(rare.asv.tab.its.2019.plant,4000)
+
+# Subsetting the metadata to remove any samples that did not pass he rarefaction cutoff. 
+met.rare.its.2019.plant<-subset(metadata_burn,metadata_burn$Sample%in%rownames(rareasv.its.2019.plant))
+
+# Converting treatment and niche to factors. 
+met.rare.its.2019.plant$Treatment<-as.factor(met.rare.its.2019.plant$Treatment)
+met.rare.its.2019.plant$Niche<-as.factor(met.rare.its.2019.plant$Niche)
+
+# Computing hill numbers using the hill_taxa function. Storing results in a data frame for each level of hill numbers. 
+fungi.hill.its.2019_q0.plant<-data.frame(q0=(hill_taxa(rareasv.its.2019.plant,q=0)))
+fungi.hill.its.2019_q1.plant<-data.frame(q1=(hill_taxa(rareasv.its.2019.plant,q=1)))
+fungi.hill.its.2019_q2.plant<-data.frame(q2=(hill_taxa(rareasv.its.2019.plant,q=2)))
+
+# Merging the hill number data frames with metadata. data frames are being merged by row names, except for metadata which is merged using the Sample column. 
+fungi.hill.its.2019.plant<-merge(merge(merge(fungi.hill.its.2019_q0.plant,fungi.hill.its.2019_q1.plant,by=0),fungi.hill.its.2019_q2.plant,by.x="Row.names",by.y=0),met.rare.its.2019.plant,by.x="Row.names",by.y="Sample")
+```
+
+## ITS Hill Numbers Plant ANOVAs
+
+```{r}
+# Using the aov function to test for a significant affect of niche by treatment on asv richness (q0). Data log transformed to meet assumptions of aov. 
+fungi.hill.aov.2019_q0_interaction.plant<-aov(log(q0)~Niche*Treatment,fungi.hill.its.2019.plant)
+
+# Evaluating if model assumptions are met using the plot function. 
+par(mfrow=c(2,2))
+plot(fungi.hill.aov.2019_q0_interaction.plant)
+
+# Determining significance using the ANOVA function with aov interaction model
+Anova(fungi.hill.aov.2019_q0_interaction.plant,type=("III"))
+
+# Model was not signficant. Dropping interaction term and rerunning analyses. 
+fungi.hill.aov.2019_q0.plant<-aov(log(q0)~Niche+Treatment,fungi.hill.its.2019.plant)
+par(mfrow=c(2,2))
+plot(fungi.hill.aov.2019_q0.plant)
+Anova(fungi.hill.aov.2019_q0.plant,type=("III"))
+
+# Using post-hoc tukey test to evaluate pair-wise differences. 
+TukeyHSD(fungi.hill.aov.2019_q0.plant)
+
+# Plotting data as a boxplot using ggplot with geom_boxplot. 
+fungi.hill.its.2019.q0.plot.plant<-ggplot(fungi.hill.its.2019.plant, aes(x=Niche, y=q0, outlier.shape=NA,color=Treatment))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_point(position = position_jitterdodge())+
+  geom_segment(aes(x=0.5,xend=1.5,y=297,yend=297),color="black")+
+  geom_segment(aes(x=1.55,xend=2.5,y=297,yend=297),color="black")+
+  geom_segment(aes(x=2.55,xend=3.5,y=297,yend=297),color="black")+
+  geom_segment(aes(x=3.55,xend=4.5,y=297,yend=297),color="black")+
+    geom_text(data=NULL,aes(x=1, y=304, label="A",fontface="bold"),color="black")+
+    geom_text(data=NULL,aes(x=2, y=304, label="A",fontface="bold"),color="black")+
+    geom_text(data=NULL,aes(x=3, y=304, label="B",fontface="bold"),color="black")+
+    geom_text(data=NULL,aes(x=4, y=304, label="A",fontface="bold"),color="black")+
+  geom_text(data=NULL,aes(x=1.20,y=320,label="Plant - Fungi Hill q0",fontface="bold"),color="black")+
+  scale_color_manual(values=c("#00BFC4","#F8766D"))+
+  xlab("Niche")+
+  ylab("Hill q0 ASV Richness")+
+  theme(panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+    panel.border=element_rect(colour="black", size=1, fill=NA))+
+  theme(panel.grid.major=element_blank(),
+       panel.grid.minor=element_blank(),
+       panel.background = element_blank(),
+  panel.border=element_rect(color="black", size=1, fill=NA),
+  axis.text = element_text(face="bold",size=18),
+  axis.title = element_text(face="bold",size=18))
+  
+
+fungi.hill.its.2019.q0.plot.plant
+
+# Using the aov function to test for a significant affect of niche by treatment on shannon diversity (q1). Data log transformed to meet assumptions of aov. 
+
+fungi.hill.aov.2019_q1_interaction.plant<-aov(log(q1)~Niche*Treatment,fungi.hill.its.2019.plant)
+
+# Evaluating if model assumptions are met using the plot function. 
+par(mfrow=c(2,2))
+plot(fungi.hill.aov.2019_q1_interaction.plant)
+
+# Determining significance using the ANOVA function with aov interaction model
+Anova(fungi.hill.aov.2019_q1_interaction.plant,type=("III"))
+
+# Model was not signficant. Dropping interaction term and rerunning analyses. 
+fungi.hill.aov.2019_q1.plant<-aov(log(q1)~Niche+Treatment,fungi.hill.its.2019.plant)
+par(mfrow=c(2,2))
+plot(fungi.hill.aov.2019_q1.plant)
+Anova(fungi.hill.aov.2019_q1.plant,type=("III"))
+
+# Using post-hoc tukey test to evaluate pair-wise differences. 
+TukeyHSD(fungi.hill.aov.2019_q1.plant)
+
+# Plotting data as a boxplot using ggplot with geom_boxplot. 
+fungi.hill.its.2019.q1.plot.plant<-ggplot(fungi.hill.its.2019.plant, aes(x=Niche, y=q1, outlier.shape=NA,color=Treatment))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_point(position = position_jitterdodge())+
+  scale_color_manual(values=c("#00BFC4","#F8766D"))+
+ geom_segment(aes(x=0.5,xend=1.5,y=105,yend=105),color="black")+
+  geom_segment(aes(x=1.55,xend=2.5,y=105,yend=105),color="black")+
+  geom_segment(aes(x=2.55,xend=3.5,y=105,yend=105),color="black")+
+  geom_segment(aes(x=3.55,xend=4.5,y=105,yend=105),color="black")+  geom_text(data=NULL,aes(x=1, y=108, label="A",fontface="bold"),color="black")+
+  geom_text(data=NULL,aes(x=2, y=108, label="A",fontface="bold"),color="black")+
+  geom_text(data=NULL,aes(x=3, y=108, label="B",fontface="bold"),color="black")+
+  geom_text(data=NULL,aes(x=4, y=108, label="A",fontface="bold"),color="black")+
+  geom_text(data=NULL,aes(x=1.2,y=114,label="Plant - Fungi Hill q1",fontface='bold'),color="black")+
+  xlab("Niche")+
+  ylab("Hill q1 (Shannon Diversity)")+
+  theme(panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+    panel.border=element_rect(colour="black", size=1, fill=NA))+
+  theme(panel.grid.major=element_blank(),
+       panel.grid.minor=element_blank(),
+       panel.background = element_blank(),
+  panel.border=element_rect(color="black", size=1, fill=NA),   axis.text = element_text(face="bold",size=18),
+  axis.title = element_text(face="bold",size=18))
+  
+
+fungi.hill.its.2019.q1.plot.plant
+
+
+# Using the aov function to test for a significant affect of niche by treatment on inverse simpson (q2). Data log transformed to meet assumptions of aov. 
+fungi.hill.aov.2019_q2_interaction.plant<-aov(log(q2)~Niche*Treatment,fungi.hill.its.2019.plant)
+
+# Evaluating if model assumptions are met using the plot function. 
+par(mfrow=c(2,2))
+plot(fungi.hill.aov.2019_q2_interaction.plant)
+
+# Determining significance using the ANOVA function with aov interaction model
+Anova(fungi.hill.aov.2019_q2_interaction.plant,type=("III"))
+
+# Model was not signficant. Dropping interaction term and rerunning analyses. 
+fungi.hill.aov.2019_q2.plant<-aov(log(q2)~Niche+Treatment,fungi.hill.its.2019.plant)
+par(mfrow=c(2,2))
+plot(fungi.hill.aov.2019_q2.plant)
+Anova(fungi.hill.aov.2019_q2.plant,type=("III"))
+
+# Using post-hoc tukey test to evaluate pair-wise differences. 
+TukeyHSD(fungi.hill.aov.2019_q2.plant)
+
+# Plotting data as a boxplot using ggplot with geom_boxplot.
+fungi.hill.its.2019.q2.plot.plant<-ggplot(fungi.hill.its.2019.plant, aes(x=Niche, y=q2, outlier.shape=NA,color=Treatment))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_point(position = position_jitterdodge())+
+  scale_color_manual(values=c("#00BFC4","#F8766D"))+
+ geom_segment(aes(x=0.5,xend=1.5,y=58,yend=58),color="black")+
+  geom_segment(aes(x=1.55,xend=2.5,y=58,yend=58),color="black")+
+  geom_segment(aes(x=2.55,xend=3.5,y=58,yend=58),color="black")+
+  geom_segment(aes(x=3.55,xend=4.5,y=58,yend=58),color="black")+
+  geom_text(data=NULL,aes(x=1, y=60, label="A",fontface="bold"),color="black")+
+  geom_text(data=NULL,aes(x=2, y=60, label="AB",fontface="bold"),color="black")+
+  geom_text(data=NULL,aes(x=3, y=60, label="B",fontface="bold"),color="black")+
+  geom_text(data=NULL,aes(x=4, y=60, label="AC",fontface="bold"),color="black")+
+  geom_text(data=NULL,aes(x=1.2,y=64,label="Plant - Fungi Hill q2",fontface="bold"),color="black")+
+  xlab("Niche")+
+   ylab("Hill q2 (Inverse Simpson)")+
+  theme(panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+    panel.border=element_rect(colour="black", size=1, fill=NA))+
+  theme(panel.grid.major=element_blank(),
+       panel.grid.minor=element_blank(),
+       panel.background = element_blank(),
+  panel.border=element_rect(color="black", size=1, fill=NA),   axis.text = element_text(face="bold",size=18),
+  axis.title = element_text(face="bold",size=18))
+  
+
+
+fungi.hill.its.2019.q2.plot.plant
+
+```
+
+
+## 16S Hill Numbers Plant ANOVAs
+
+Calculating alpha diversity for bacterial/archaeal communities in all plant niches. 
+
+```{r}
+# Importing rarefied bacterial/archaeal ASV table. 
+rare.asv.tab.16s.2019.plant<-read.table("/Volumes/Beant_Kapoor/sequence_processing/raw_sequence_data_bac_dwdmcb/rarefied_asv_tables_16s/rare.asv.tab.16s.2019.plant.txt",header=TRUE,sep='\t')
+
+# Using the rarefy_formatting function to remove samples that did not have at least 1034 sequences. 
+rareasv.16s.2019.plant<-rarefy_formatting(rare.asv.tab.16s.2019.plant,1034)
+
+# Subsetting the metadata to remove any samples that did not pass the rarefaction cutoff. 
+met.rare.16s.2019.plant<-subset(metadata_burn_16s,metadata_burn_16s$Sample%in%rownames(rareasv.16s.2019.plant))
+
+# Converting treatment and niche to factors. 
+met.rare.16s.2019.plant$Treatment<-as.factor(met.rare.16s.2019.plant$Treatment)
+met.rare.16s.2019.plant$Niche<-as.factor(met.rare.16s.2019.plant$Niche)
+
+# Computing hill numbers using the hill_taxa function. Storing results in a data frame for each level of hill numbers. 
+bac.hill.16s.2019_q0.plant<-data.frame(q0=(hill_taxa(rareasv.16s.2019.plant,q=0)))
+bac.hill.16s.2019_q1.plant<-data.frame(q1=(hill_taxa(rareasv.16s.2019.plant,q=1)))
+bac.hill.16s.2019_q2.plant<-data.frame(q2=(hill_taxa(rareasv.16s.2019.plant,q=2)))
+
+# Merging the hill number data frames with metadata. data frames are being merged by row names, except for metadata which is merged using the Sample column. 
+bac.hill.16s.2019.plant<-merge(merge(merge(bac.hill.16s.2019_q0.plant,bac.hill.16s.2019_q1.plant,by=0),bac.hill.16s.2019_q2.plant,by.x="Row.names",by.y=0),met.rare.16s.2019.plant,by.x="Row.names",by.y="Sample")
+
+```
+
+## 16S Hill Numbers Plant ANOVAs
+
+```{r}
+# Using the aov function to test for a significant affect of niche by treatment on asv richness (q0). Data log transformed to meet assumptions of aov. 
+bac.hill.aov.2019_q0_interaction.plant<-aov(log(q0)~Niche*Treatment,bac.hill.16s.2019.plant)
+
+# Evaluating if model assumptions are met using the plot function. 
+par(mfrow=c(2,2))
+plot(bac.hill.aov.2019_q0_interaction.plant)
+
+# Determining significance using the ANOVA function with aov interaction model
+Anova(bac.hill.aov.2019_q0_interaction.plant,type=("III"))
+
+# Using post-hoc tukey test to evaluate pair-wise differences. 
+TukeyHSD(bac.hill.aov.2019_q0_interaction.plant)
+
+# Plotting data as a boxplot using ggplot with geom_boxplot. 
+bac.hill.16s.2019.q0.plot.plant<-ggplot(bac.hill.16s.2019.plant, aes(x=Niche, y=(q0), outlier.shape=NA,color=Treatment))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_point(position = position_jitterdodge())+
+  scale_color_manual(values=c("#00BFC4","#F8766D"))+
+  geom_segment(aes(x=0.6,xend=0.98,y=525,yend=525),color="black")+
+  geom_segment(aes(x=1,xend=1.4,y=525,yend=525),color="black")+
+  geom_segment(aes(x=1.55,xend=1.95,y=525,yend=525),color="black")+
+  geom_segment(aes(x=1.97,xend=2.4,y=525,yend=525),color="black")+
+  geom_segment(aes(x=2.55,xend=2.95,y=525,yend=525),color="black")+
+  geom_segment(aes(x=2.97,xend=3.4,y=525,yend=525),color="black")+
+  geom_segment(aes(x=3.55,xend=3.95,y=525,yend=525),color="black")+
+  geom_segment(aes(x=3.97,xend=4.4,y=525,yend=525),color="black")+
+  geom_text(data=NULL,aes(x=0.8, y=537, label="A",fontface="bold"),color="black")+
+    geom_text(data=NULL,aes(x=1.2, y=537, label="A",fontface="bold"),color="black")+
+    geom_text(data=NULL,aes(x=1.75, y=537, label="BC",fontface="bold"),color="black")+
+    geom_text(data=NULL,aes(x=2.17, y=537, label="B",fontface="bold"),color="black")+
+    geom_text(data=NULL,aes(x=2.75, y=537, label="BD",fontface="bold"),color="black")+
+    geom_text(data=NULL,aes(x=3.17, y=537, label="BC",fontface="bold"),color="black")+
+    geom_text(data=NULL,aes(x=3.75, y=537, label="B",fontface="bold"),color="black")+
+    geom_text(data=NULL,aes(x=4.17, y=537, label="B",fontface="bold"),color="black")+
+  geom_text(data=NULL,aes(x=1.62,y=567,label="Plant - Bacteria/Archaea Hill q0",fontface="bold"),color="black")+
+  xlab("Niche")+
+  ylab("Hill q0 (ASV Richness)")+
+  theme(panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+    panel.border=element_rect(colour="black", size=1, fill=NA))+
+  theme(panel.grid.major=element_blank(),
+       panel.grid.minor=element_blank(),
+       panel.background = element_blank(),
+  panel.border=element_rect(color="black", size=1, fill=NA),
+  axis.text = element_text(face="bold",size=18),
+  axis.title = element_text(face="bold",size=18))
+  
+
+bac.hill.16s.2019.q0.plot.plant
+
+# Using the aov function to test for a significant affect of niche by treatment on asv richness (q0). Data log transformed to meet assumptions of aov. 
+bac.hill.aov.2019_q1_interaction.plant<-aov(log(q1)~Niche*Treatment,bac.hill.16s.2019.plant)
+
+# Evaluating if model assumptions are met using the plot function. 
+par(mfrow=c(2,2))
+plot(bac.hill.aov.2019_q1_interaction.plant)
+
+# Determining significance using the ANOVA function with aov interaction model
+Anova(bac.hill.aov.2019_q1_interaction.plant,type=("III"))
+
+# Using post-hoc tukey test to evaluate pair-wise differences. 
+TukeyHSD(bac.hill.aov.2019_q1_interaction.plant)
+
+# Plotting data as a boxplot using ggplot with geom_boxplot. 
+bac.hill.16s.2019.q1.plot.plant<-ggplot(bac.hill.16s.2019.plant, aes(x=Niche, y=(q1), outlier.shape=NA,color=Treatment))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_point(position = position_jitterdodge())+
+  scale_color_manual(values=c("#00BFC4","#F8766D"))+
+  geom_segment(aes(x=0.6,xend=0.98,y=365,yend=365),color="black")+
+  geom_segment(aes(x=1,xend=1.4,y=365,yend=365),color="black")+
+  geom_segment(aes(x=1.55,xend=1.95,y=365,yend=365),color="black")+
+  geom_segment(aes(x=1.97,xend=2.4,y=365,yend=365),color="black")+
+  geom_segment(aes(x=2.55,xend=2.95,y=365,yend=365),color="black")+
+  geom_segment(aes(x=2.97,xend=3.4,y=365,yend=365),color="black")+
+  geom_segment(aes(x=3.55,xend=3.95,y=365,yend=365),color="black")+
+  geom_segment(aes(x=3.97,xend=4.4,y=365,yend=365),color="black")+
+  geom_text(data=NULL,aes(x=0.8, y=377, label="A",fontface="bold"),color="black")+
+    geom_text(data=NULL,aes(x=1.2, y=377, label="A",fontface="bold"),color="black")+
+    geom_text(data=NULL,aes(x=1.75, y=377, label="B",fontface="bold"),color="black")+
+    geom_text(data=NULL,aes(x=2.17, y=377, label="B",fontface="bold"),color="black")+
+    geom_text(data=NULL,aes(x=2.75, y=377, label="BD",fontface="bold"),color="black")+
+    geom_text(data=NULL,aes(x=3.17, y=377, label="BC",fontface="bold"),color="black")+
+    geom_text(data=NULL,aes(x=3.75, y=377, label="BD",fontface="bold"),color="black")+
+    geom_text(data=NULL,aes(x=4.17, y=377, label="B",fontface="bold"),color="black")+
+   geom_text(data=NULL,aes(x=1.62,y=402,label="Plant - Bacteria/Archaea Hill q1",fontface="bold"),color="black")+
+  xlab("Niche")+
+  ylab("Hill q1 (Shannon Diversity)")+
+  theme(panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+    panel.border=element_rect(colour="black", size=1, fill=NA))+
+  theme(panel.grid.major=element_blank(),
+       panel.grid.minor=element_blank(),
+       panel.background = element_blank(),
+  panel.border=element_rect(color="black", size=1, fill=NA),
+  axis.text = element_text(face="bold",size=18),
+  axis.title = element_text(face="bold",size=18))
+  
+
+bac.hill.16s.2019.q1.plot.plant
+
+# Using the aov function to test for a significant affect of niche by treatment on asv richness (q0). Data log transformed to meet assumptions of aov. 
+bac.hill.aov.2019_q2_interaction.plant<-aov(log(q2)~Niche*Treatment,bac.hill.16s.2019.plant)
+
+# Evaluating if model assumptions are met using the plot function. 
+par(mfrow=c(2,2))
+plot(bac.hill.aov.2019_q2_interaction.plant)
+
+# Determining significance using the ANOVA function with aov interaction model
+Anova(bac.hill.aov.2019_q2_interaction.plant,type=("III"))
+
+# Model was not signficant. Dropping interaction term and rerunning analyses. 
+TukeyHSD(bac.hill.aov.2019_q2_interaction.plant)
+
+# Plotting data as a boxplot using ggplot with geom_boxplot. 
+bac.hill.16s.2019.q2.plot.plant<-ggplot(bac.hill.16s.2019.plant, aes(x=Niche, y=q2, outlier.shape=NA,color=Treatment))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_point(position = position_jitterdodge())+
+geom_segment(aes(x=0.6,xend=0.98,y=230,yend=230),color="black")+
+  geom_segment(aes(x=1,xend=1.4,y=230,yend=230),color="black")+
+  geom_segment(aes(x=1.55,xend=1.95,y=230,yend=230),color="black")+
+  geom_segment(aes(x=1.97,xend=2.4,y=230,yend=230),color="black")+
+  geom_segment(aes(x=2.55,xend=2.95,y=230,yend=230),color="black")+
+  geom_segment(aes(x=2.97,xend=3.4,y=230,yend=230),color="black")+
+  geom_segment(aes(x=3.55,xend=3.95,y=230,yend=230),color="black")+
+  geom_segment(aes(x=3.97,xend=4.4,y=230,yend=230),color="black")+
+  geom_text(data=NULL,aes(x=0.8, y=236, label="A",fontface="bold"),color="black")+
+    geom_text(data=NULL,aes(x=1.2, y=236, label="A",fontface="bold"),color="black")+
+    geom_text(data=NULL,aes(x=1.75, y=236, label="B",fontface="bold"),color="black")+
+    geom_text(data=NULL,aes(x=2.17, y=236, label="B",fontface="bold"),color="black")+
+    geom_text(data=NULL,aes(x=2.75, y=236, label="BD",fontface="bold"),color="black")+
+    geom_text(data=NULL,aes(x=3.17, y=236, label="BC",fontface="bold"),color="black")+
+    geom_text(data=NULL,aes(x=3.75, y=236, label="BD",fontface="bold"),color="black")+
+    geom_text(data=NULL,aes(x=4.17, y=236, label="B",fontface="bold"),color="black")+
+   geom_text(data=NULL,aes(x=1.62,y=249,label="Plant - Bacteria/Archaea Hill q2",fontface="bold"),color="black")+
+  scale_color_manual(values=c("#00BFC4","#F8766D"))+
+  xlab("Niche")+
+  ylab(bquote("Hill q2 (Inverse Simpson)"))+
+  theme(panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+    panel.border=element_rect(colour="black", size=1, fill=NA))+
+  theme(panel.grid.major=element_blank(),
+       panel.grid.minor=element_blank(),
+       panel.background = element_blank(),
+  panel.border=element_rect(color="black", size=1, fill=NA),   axis.text = element_text(face="bold",size=18),
+  axis.title = element_text(face="bold",size=18))
+  
+
+
+bac.hill.16s.2019.q2.plot.plant
+```
+
+
+##  ITS Hill Numbers Soils
+
+```{r}
+# Using grep to subset the metadata and pull out only soil samples.  
+met.its.soil<-metadata_burn[grep("Soil",metadata_burn$Niche),]
+
+# Importing rarefied fungal soil data. 
+rare.asv.tab.its.2019.soil<-read.table("/Volumes/Beant_Kapoor/sequence_processing/raw_sequence_data_its_dwdmcb/rarefied_asv_tables_its/rare.asv.tab.its.2019.soil.txt",header=TRUE,sep='\t')
+
+# Using the rarefy_formatting function to remove samples that did not have at least 12,230 sequences. 
+rareasv.its.2019.soil<-rarefy_formatting(rare.asv.tab.its.2019.soil,12230)
+
+# Subsetting the metadata to remove any samples that did not pass he rarefaction cutoff. 
+met.rare.its.2019.soil<-subset(met.its.soil,met.its.soil$Sample%in%rownames(rareasv.its.2019.soil))
+
+# Converting treatment and niche to factors. 
+met.rare.its.2019.soil$Treatment<-as.factor(met.rare.its.2019.soil$Treatment)
+
+# Computing hill numbers using the hill_taxa function. Storing results in a data frame for each level of hill numbers. 
+fungi.hill.its.2019_q0.soil<-data.frame(q0=(hill_taxa(rareasv.its.2019.soil,q=0)))
+fungi.hill.its.2019_q1.soil<-data.frame(q1=(hill_taxa(rareasv.its.2019.soil,q=1)))
+fungi.hill.its.2019_q2.soil<-data.frame(q2=(hill_taxa(rareasv.its.2019.soil,q=2)))
+
+# Merging the hill number data frames with metadata. data frames are being merged by row names, except for metadata which is merged using the Sample column. 
+fungi.hill.its.2019.soil<-merge(merge(merge(fungi.hill.its.2019_q0.soil,fungi.hill.its.2019_q1.soil,by=0),fungi.hill.its.2019_q2.soil,by.x="Row.names",by.y=0),met.rare.its.2019.soil,by.x="Row.names",by.y="Sample")
+
+# Using the t.test function to test for significant differences in asv richness (q0) between unburned and burned plots. 
+fungi.hill.t.test.2019_q0.soil<-t.test((q0)~Treatment,data=fungi.hill.its.2019.soil)
+fungi.hill.t.test.2019_q0.soil
+
+# Testing assumptions of t.test using shapiro.test and leveneTest functions. 
+shapiro.test(fungi.hill.its.2019.soil$q0)
+leveneTest(fungi.hill.its.2019.soil$q0,group =fungi.hill.its.2019.soil$Treatment)
+
+
+#  Plotting data as a boxplot using ggplot2. 
+fungi.hill.its.2019.q0.plot.soil<-ggplot(fungi.hill.its.2019.soil, aes(x=Treatment, y=q0, outlier.shape=NA,color=Treatment))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_point(position = position_jitterdodge())+
+  xlab("Treatment")+
+  ylab("Hill q0 (ASV Richness)")+
+  geom_text(data=NULL,aes(x=0.8,y=310,label="Soil - Fungi Hill q0",fontface="bold"),color="black")+
+  scale_color_manual(values=c("#00BFC4","#F8766D"))+
+  theme(panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+    panel.border=element_rect(colour="black", size=1, fill=NA))+
+  theme(panel.grid.major=element_blank(),
+       panel.grid.minor=element_blank(),
+       panel.background = element_blank(),
+  panel.border=element_rect(color="black", size=1, fill=NA),   axis.text = element_text(face="bold",size=18),
+  axis.title = element_text(face="bold",size=18))
+  
+
+fungi.hill.its.2019.q0.plot.soil
+
+
+# Using the t.test function to test for significant differences in asv shannon entropy (q1) between unburned and burned plots. 
+fungi.hill.t.test.2019_q1.soil<-t.test((q1)~Treatment,data=fungi.hill.its.2019.soil)
+fungi.hill.t.test.2019_q1.soil
+
+# Testing t.test assumptions using the shapiro.test and leveneTest functions. 
+shapiro.test(fungi.hill.its.2019.soil$q1)
+leveneTest(fungi.hill.its.2019.soil$q1,group =fungi.hill.its.2019.soil$Treatment )
+
+
+# Plotting data as a boxplot using ggplot2. 
+fungi.hill.its.2019.q1.plot.soil<-ggplot(fungi.hill.its.2019.soil, aes(x=Treatment, y=q1, outlier.shape=NA,color=Treatment))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_point(position = position_jitterdodge())+
+  xlab("Treatment")+
+  ylab("Hill q1 (Shannon Entropy)")+
+   geom_text(data=NULL,aes(x=0.8,y=87,label="Soil - Fungi Hill q1",fontface="bold"),color="black")+
+  scale_color_manual(values=c("#00BFC4","#F8766D"))+
+  theme(panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+    panel.border=element_rect(colour="black", size=1, fill=NA))+
+  theme(panel.grid.major=element_blank(),
+       panel.grid.minor=element_blank(),
+       panel.background = element_blank(),
+  panel.border=element_rect(color="black", size=1, fill=NA),   axis.text = element_text(face="bold",size=18),
+  axis.title = element_text(face="bold",size=18))
+  
+
+fungi.hill.its.2019.q1.plot.soil
+
+# Using the t.test function to test for significant differences in inverse simpson (q2) between unburned and burned plots. 
+fungi.hill.t.test.2019_q2.soil<-t.test((q2)~Treatment,data=fungi.hill.its.2019.soil)
+fungi.hill.t.test.2019_q2.soil 
+
+# Testing model assumptions using shapiro.test and leveneTest functions.
+shapiro.test(fungi.hill.its.2019.soil$q2)
+leveneTest(fungi.hill.its.2019.soil$q2,group =fungi.hill.its.2019.soil$Treatment)
+
+# Plotting data as a boxplot using ggplot2. 
+fungi.hill.its.2019.q2.plot.soil<-ggplot(fungi.hill.its.2019.soil, aes(x=Treatment, y=q2, outlier.shape=NA,color=Treatment))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_point(position = position_jitterdodge())+
+  xlab("Treatment")+
+  ylab("Hill q2 (Inverse Simpson)")+
+   geom_text(data=NULL,aes(x=0.8,y=35,label="Soil - Fungi Hill q2",fontface="bold"),color="black")+
+  scale_color_manual(values=c("#00BFC4","#F8766D"))+
+  theme(panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+    panel.border=element_rect(colour="black", size=1, fill=NA))+
+  theme(panel.grid.major=element_blank(),
+       panel.grid.minor=element_blank(),
+       panel.background = element_blank(),
+  panel.border=element_rect(color="black", size=1, fill=NA),   axis.text = element_text(face="bold",size=18),
+  axis.title = element_text(face="bold",size=18))
+  
+fungi.hill.its.2019.q2.plot.soil
+```
+
+
+##  16S Hill Numbers Soils
+
+```{r}
+# Using grep to subset the metadata and pull out only soil samples.  
+met.16s.soil<-metadata_burn_16s[grep("Soil",metadata_burn_16s$Niche),]
+
+# Importing rarefied fungal soil data. 
+rare.asv.tab.16s.2019.soil<-read.table("/Volumes/Beant_Kapoor/sequence_processing/raw_sequence_data_bac_dwdmcb/rarefied_asv_tables_16s/rare.asv.tab.16s.2019.soil.txt",sep="\t",header=TRUE)
+
+# Using the rarefy_formatting function to remove samples that did not have at least 8488 sequences. 
+rareasv.16s.2019.soil<-rarefy_formatting(rare.asv.tab.16s.2019.soil,8488)
+
+# Subsetting the metadata to remove any samples that did not pass he rarefaction cutoff. 
+met.rare.16s.2019.soil<-subset(met.16s.soil,met.16s.soil$Sample%in%rownames(rareasv.16s.2019.soil))
+
+# Converting treatment to a factor. 
+met.rare.16s.2019.soil$Treatment<-as.factor(met.rare.16s.2019.soil$Treatment)
+
+# Computing hill numbers using the hill_taxa function. Storing results in a data frame for each level of hill numbers. 
+bac.hill.16s.2019_q0.soil<-data.frame(q0=(hill_taxa(rareasv.16s.2019.soil,q=0)))
+bac.hill.16s.2019_q1.soil<-data.frame(q1=(hill_taxa(rareasv.16s.2019.soil,q=1)))
+bac.hill.16s.2019_q2.soil<-data.frame(q2=(hill_taxa(rareasv.16s.2019.soil,q=2)))
+
+# Merging the hill number data frames with metadata. data frames are being merged by row names, except for metadata which is merged using the Sample column. 
+bac.hill.16s.2019.soil<-merge(merge(merge(bac.hill.16s.2019_q0.soil,bac.hill.16s.2019_q1.soil,by=0),bac.hill.16s.2019_q2.soil,by.x="Row.names",by.y=0),met.rare.16s.2019.soil,by.x="Row.names",by.y="Sample")
+
+# Using the t.test function to test for significant differences in asv richness (q0) between unburned and burned plots. 
+bac.hill.t.test.2019_q0.soil<-t.test((q0)~Treatment,data=bac.hill.16s.2019.soil)
+bac.hill.t.test.2019_q0.soil
+
+# Testing assumptions of t.test using shapiro.test and leveneTest functions. 
+shapiro.test(bac.hill.16s.2019.soil$q0)
+leveneTest(bac.hill.16s.2019.soil$q0,group =bac.hill.16s.2019.soil$Treatment )
+
+# Plotting data as a boxplot using ggplot2. 
+bac.hill.16s.2019.q0.plot.soil<-ggplot(bac.hill.16s.2019.soil, aes(x=Treatment, y=q0, outlier.shape=NA,color=Treatment))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_point(position = position_jitterdodge())+
+  xlab("Treatment")+
+  ylab("Hill q0 (ASV Richness)")+
+   geom_text(data=NULL,aes(x=1.02,y=1075,label="Soil - Bacteria/Archaea Hill q0",fontface="bold"),color="black")+
+  theme(panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+    panel.border=element_rect(colour="black", size=1, fill=NA))+
+  theme(panel.grid.major=element_blank(),
+       panel.grid.minor=element_blank(),
+       panel.background = element_blank(),
+  panel.border=element_rect(color="black", size=1, fill=NA),   axis.text = element_text(face="bold",size=18),
+  axis.title = element_text(face="bold",size=18))+
+    scale_color_manual(values=c("#00BFC4","#F8766D"))
+  
+bac.hill.16s.2019.q0.plot.soil
+
+
+# Using the t.test function to test for significant differences in asv shannon entropy (q1) between unburned and burned plots. 
+bac.hill.t.test.2019_q1.soil<-t.test((q1)~Treatment,data=bac.hill.16s.2019.soil)
+bac.hill.t.test.2019_q1.soil
+
+# Testing t.test assumptions using the shapiro.test and leveneTest functions. 
+shapiro.test(bac.hill.16s.2019.soil$q1)
+leveneTest(bac.hill.16s.2019.soil$q1,group=bac.hill.16s.2019.soil$Treatment )
+
+# Plotting data as a boxplot using ggplot2. 
+bac.hill.16s.2019.q1.plot.soil<-ggplot(bac.hill.16s.2019.soil, aes(x=Treatment, y=(q1), outlier.shape=NA,color=Treatment))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_point(position = position_jitterdodge())+
+  xlab("Treatment")+
+  ylab("Hill  (Shannon Entropy)")+
+   geom_text(data=NULL,aes(x=1.02,y=575,label="Soil - Bacteria/Archaea Hill q1",fontface="bold"),color="black")+
+  theme(panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+    panel.border=element_rect(colour="black", size=1, fill=NA))+
+  theme(panel.grid.major=element_blank(),
+       panel.grid.minor=element_blank(),
+       panel.background = element_blank(),
+  panel.border=element_rect(color="black", size=1, fill=NA),   axis.text = element_text(face="bold",size=18),
+  axis.title = element_text(face="bold",size=18))+
+   scale_color_manual(values=c("#00BFC4","#F8766D"))
+  
+
+bac.hill.16s.2019.q1.plot.soil
+
+
+# Using the t.test function to test for significant differences in inverse simpson (q2) between unburned and burned plots. 
+bac.hill.t.test.2019_q2.soil<-t.test((q2)~Treatment,data=bac.hill.16s.2019.soil)
+bac.hill.t.test.2019_q2.soil
+
+# Testing model assumptions using shapiro.test and leveneTest functions.
+shapiro.test(bac.hill.16s.2019.soil$q2)
+leveneTest(bac.hill.16s.2019.soil$q2,group =bac.hill.16s.2019.soil$Treatment )
+
+# Plotting data as a boxplot using ggplot2. 
+bac.hill.16s.2019.q2.plot.soil<-ggplot(bac.hill.16s.2019.soil, aes(x=Treatment, y=q2, outlier.shape=NA,color=Treatment))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_point(position = position_jitterdodge())+
+  xlab("Treatment")+
+  ylab("Hill q2 (Inverse Simpson)")+
+   geom_text(data=NULL,aes(x=1.02,y=285,label="Soil - Bacteria/Archaea Hill q2",fontface="bold"),color="black")+
+  theme(panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+    panel.border=element_rect(colour="black", size=1, fill=NA))+
+  theme(panel.grid.major=element_blank(),
+       panel.grid.minor=element_blank(),
+       panel.background = element_blank(),
+  panel.border=element_rect(color="black", size=1, fill=NA),   axis.text = element_text(face="bold",size=18),
+  axis.title = element_text(face="bold",size=18))+
+   scale_color_manual(values=c("#00BFC4","#F8766D"))
+  
+
+bac.hill.16s.2019.q2.plot.soil
+```
+
+
+```{r}
+# Creating a multipanel figure of plant associated hill plots for publication.
+hill_plot.2019_plant<-ggarrange(fungi.hill.its.2019.q0.plot.plant,
+          bac.hill.16s.2019.q0.plot.plant,
+          fungi.hill.its.2019.q1.plot.plant,
+          bac.hill.16s.2019.q1.plot.plant,
+          fungi.hill.its.2019.q2.plot.plant,
+          bac.hill.16s.2019.q2.plot.plant,
+          nrow=3,ncol=2,common.legend = TRUE, labels=c("A","D","B","E","C","F"))
+
+hill_plot.2019_plant
+
+#ggsave('/Volumes/Beant_Kapoor/Kapoor et al. 2021_Dogwwod Microbiome Manuscript_forest ecology/hill_plots_plant_figure1.eps',plot = hill_plot.2019_plant,width = 10,height=14,bg="white",dpi=500)
+
+# Creating a multipanel figure of soil hill plots for publication.
+hill_plot.2019_soil<-ggarrange(fungi.hill.its.2019.q0.plot.soil,
+          bac.hill.16s.2019.q0.plot.soil,
+          fungi.hill.its.2019.q1.plot.soil,
+          bac.hill.16s.2019.q1.plot.soil,
+          fungi.hill.its.2019.q2.plot.soil,
+          bac.hill.16s.2019.q2.plot.soil,
+          nrow=3,ncol=2,common.legend = TRUE, labels=c("A","D","B","E","C","F"))
+
+hill_plot.2019_soil
+
+#ggsave("/Volumes/Beant_Kapoor/Kapoor et al. 2021_Dogwwod Microbiome Manuscript_forest ecology/hill_plots_soil_figure2.eps",plot = hill_plot.2019_soil,width = 10,height=14,bg="white",dpi=500)
+
+```
+
+# Beta Diversity
+
+Calculating beta-diversity for fungi and bacteria/archaea. 
+
+## Fungal PCoA
+
+```{r}
+# Merging rarefied plant asv data with metadata using the merge function.
+plant.met.rareasv.its.2019<-merge(met.rare.its.2019.plant,rareasv.its.2019.plant,by.x="Sample",by.y=0)
+
+# Calculating ASV relative abundance using the decostand function. 
+relabund.asv.plant.its<-decostand(plant.met.rareasv.its.2019[,6:length(plant.met.rareasv.its.2019)], method="total")
+
+# Generating a PCoA plot using the pcoa_imager function
+its_2019_pcoa_plot.plant<-pcoa_imager(plant.met.rareasv.its.2019[,6:length(plant.met.rareasv.its.2019)],method="bray",color=plant.met.rareasv.its.2019$Niche,shape=plant.met.rareasv.its.2019$Treatment)+
+  labs(shape="Treatment",color="Niche")+   geom_text(data=NULL,aes(x=-0.37,y=0.4,label='Plant - Fungi',fontface="bold"),color="black",size=6)+
+  xlab("PC1 (11.3%)")+
+  ylab("PC2 (8.1%)")+
+  theme(axis.text = element_text(face="bold"),
+  axis.title = element_text(face="bold"),legend.text=element_text(size=15),legend.title=element_text(size=15))
+
+its_2019_pcoa_plot.plant
+
+# Calculating sample distances using the vegdist function.  
+distances_its.plant<-vegdist(plant.met.rareasv.its.2019[,6:length(plant.met.rareasv.its.2019)])
+
+# Using the betadisper and anova functions to test for equality of variance between niches. 
+beta_disper_model_its.plant.niche<-betadisper(distances_its.plant,plant.met.rareasv.its.2019$Niche)
+anova(beta_disper_model_its.plant.niche)
+
+# Using the betadisper and anova functions to test for equality of variance between treatments. 
+beta_disper_model_its.plant.treatment<-betadisper(distances_its.plant,plant.met.rareasv.its.2019$Treatment)
+anova(beta_disper_model_its.plant.treatment)
+
+# Using the adonis function to perform a PERMANOVA
+adonis2(plant.met.rareasv.its.2019[,6:length(plant.met.rareasv.its.2019)]~plant.met.rareasv.its.2019$Treatment*plant.met.rareasv.its.2019$Niche)
+```
+
+
+# Roots Fungal Beta Diversity
+```{r}
+# Subsetting the metadata file that contains only the root data. 
+met.its.roots<-metadata_burn[grep("Roots",metadata_burn$Niche),]
+
+# Importing  the rarefied root ASV table. 
+rare.asv.tab.its.2019.roots<-read.table("/Volumes/Beant_Kapoor/sequence_processing/raw_sequence_data_its_dwdmcb/rarefied_asv_tables_its/rare.asv.tab.its.2019.roots.txt",header=TRUE,sep='\t')
+
+# Using the rarefy_formatting function to remove unrarefied root samples.
+rareasv.its.2019.roots<-rarefy_formatting(rare.asv.tab.its.2019.roots,4000)
+
+# Subsetting the metadata file to remove unrarefied samples. 
+met.rare.its.2019.roots<-subset(met.its.roots,met.its.roots$Sample%in%rownames(rareasv.its.2019.roots))
+
+# Converting treatment to a factor
+met.rare.its.2019.roots$Treatment<-as.factor(met.rare.its.2019.roots$Treatment)
+
+# Merging metadata into ASV table. 
+roots.met.rareasv.its.2019<-merge(met.rare.its.2019.roots,rareasv.its.2019.roots,by.x="Sample",by.y=0)
+
+# Calculating sample distances using vegdist function from vegan. 
+distances_its_roots<-vegdist(roots.met.rareasv.its.2019[,6:length(roots.met.rareasv.its.2019)],method="bray")
+
+# Testing homogeneity of variances using betadisper function
+beta_disper_model_its_roots.treatment<-betadisper(distances_its_roots,roots.met.rareasv.its.2019$Treatment)
+anova(beta_disper_model_its_roots.treatment)
+
+# Generating a PCoA plot using the pcoa_imager function
+roots_its_2019<-pcoa_imager(roots.met.rareasv.its.2019[,6:length(roots.met.rareasv.its.2019)],method="bray",color=roots.met.rareasv.its.2019$Treatment)+
+  labs(color="Treatment")+
+  geom_text(data=NULL,aes(x=-0.20,y=0.4,label="Root - Fungi",fontface="bold"),color="black",size=6)+
+     scale_color_manual(values=c("#00BFC4","#F8766D"))+
+    xlab("PC1 (15.0%)")+
+  ylab("PC2 (10.6%)")+
+  theme(axis.text = element_text(face="bold"),
+  axis.title = element_text(face="bold"),legend.text=element_text(size=15),legend.title=element_text(size=15))
+roots_its_2019
+
+# Using the adonis function to perform a PERMANOVA. 
+adonis2(roots.met.rareasv.its.2019[,6:length(roots.met.rareasv.its.2019)]~roots.met.rareasv.its.2019$Treatment)
+```
+
+## Bark Beta-Diversity
+```{r}
+# Subsetting the metadata file that contains only the bark data. 
+met.its.bark<-metadata_burn[grep("Bark",metadata_burn$Niche),]
+
+# Importing  the rarefied bark ASV table. 
+rare.asv.tab.its.2019.bark<-read.table("/Volumes/Beant_Kapoor/sequence_processing/raw_sequence_data_its_dwdmcb/rarefied_asv_tables_its/rare.asv.tab.its.2019.bark.txt",header=TRUE,sep='\t')
+
+# Using the rarefy_formatting function to remove unrarefied bark samples.
+rareasv.its.2019.bark<-rarefy_formatting(rare.asv.tab.its.2019.bark,10221)
+
+# Subsetting the metadata file to remove unrarefied samples. 
+met.rare.its.2019.bark<-subset(met.its.bark,met.its.bark$Sample%in%rownames(rareasv.its.2019.bark))
+
+# Converting treatment to a factor
+met.rare.its.2019.bark$Treatment<-as.factor(met.rare.its.2019.bark$Treatment)
+
+# Merging metadata into ASV table. 
+bark.met.rareasv.its.2019<-merge(met.rare.its.2019.bark,rareasv.its.2019.bark,by.x="Sample",by.y=0)
+
+# Calculating sample distances using vegdist function from vegan. 
+distances_its_bark<-vegdist(bark.met.rareasv.its.2019[,6:length(bark.met.rareasv.its.2019)],method="bray")
+
+
+# Testing homogeneity of variances using betadisper function
+beta_disper_model_its_bark.treatment<-betadisper(distances_its_bark,bark.met.rareasv.its.2019$Treatment)
+anova(beta_disper_model_its_bark.treatment)
+
+# Generating a PCoA plot using the pcoa_imager function
+bark_its_2019<-pcoa_imager(bark.met.rareasv.its.2019[,6:length(bark.met.rareasv.its.2019)],method="bray",color=bark.met.rareasv.its.2019$Treatment)+
+  labs(color="Treatment")+
+  geom_text(data=NULL,aes(x=-0.40,y=0.45,label="Bark - Fungi",fontface="bold"),color="black",size=6)+
+  scale_color_manual(values=c("#00BFC4","#F8766D"))+
+  xlab("PC1 (13.8%)")+
+  ylab("PC2 (10.1%)")+
+  theme(axis.text = element_text(face="bold"),
+  axis.title = element_text(face="bold"),legend.text=element_text(size=15),legend.title=element_text(size=15))
+bark_its_2019
+
+# Generating a PCoA plot using the pcoa_imager function
+adonis2(bark.met.rareasv.its.2019[,6:length(bark.met.rareasv.its.2019)]~bark.met.rareasv.its.2019$Treatment)
+```
+
+
+## Stem Beta  Diversity
+```{r}
+# Subsetting the metadata file that contains only the stem data. 
+met.its.stem<-metadata_burn[grep("Stem",metadata_burn$Niche),]
+
+# Importing  the rarefied stem ASV table. 
+rare.asv.tab.its.2019.stem<-read.table("/Volumes/Beant_Kapoor/sequence_processing/raw_sequence_data_its_dwdmcb/rarefied_asv_tables_its/rare.asv.tab.its.2019.stem.txt",header=TRUE,sep='\t')
+
+# Using the rarefy_formatting function to remove unrarefied stem samples.
+rareasv.its.2019.stem<-rarefy_formatting(rare.asv.tab.its.2019.stem,5098)
+
+# Subsetting the metadata file to remove unrarefied samples. 
+met.rare.its.2019.stem<-subset(met.its.stem,met.its.stem$Sample%in%rownames(rareasv.its.2019.stem))
+
+# Converting treatment to a factor
+met.rare.its.2019.stem$Treatment<-as.factor(met.rare.its.2019.stem$Treatment)
+
+# Merging metadata into ASV table. 
+stem.met.rareasv.its.2019<-merge(met.rare.its.2019.stem,rareasv.its.2019.stem,by.x="Sample",by.y=0)
+
+# Calculating sample distances using vegdist function from vegan. 
+distances_its_stem<-vegdist(stem.met.rareasv.its.2019[,6:length(stem.met.rareasv.its.2019)],method="bray")
+
+# Testing homogeneity of variances using betadisper function
+beta_disper_model_its_stem.treatment<-betadisper(distances_its_stem,stem.met.rareasv.its.2019$Treatment)
+anova(beta_disper_model_its_stem.treatment)
+
+# Generating a PCoA plot using the pcoa_imager function
+stem_its_2019<-pcoa_imager(stem.met.rareasv.its.2019[,6:length(stem.met.rareasv.its.2019)],method="bray",color=stem.met.rareasv.its.2019$Treatment)+
+  labs(color="Treatment")+
+      geom_text(data=NULL,aes(x=-0.20,y=0.55,label="Stem - Fungi",fontface="bold"),color="black",size=6)+
+  scale_color_manual(values=c("#00BFC4","#F8766D"))+
+  xlab("PC1 (21.5%)")+
+  ylab("PC2 (13.8%)")+
+  theme(axis.text = element_text(face="bold"),
+  axis.title = element_text(face="bold"),legend.text=element_text(size=15),legend.title=element_text(size=15))
+stem_its_2019
+
+# Using the adonis function to perform a PERMANOVA. 
+adonis2(stem.met.rareasv.its.2019[,6:length(stem.met.rareasv.its.2019)]~stem.met.rareasv.its.2019$Treatment)
+```
+
+
+## Leaf Beta  Diversity
+```{r}
+# Subsetting the metadata file that contains only the leaves data. 
+met.its.leaves<-metadata_burn[grep("Leaves",metadata_burn$Niche),]
+
+# Importing  the rarefied leaves ASV table. 
+rare.asv.tab.its.2019.leaves<-read.table("/Volumes/Beant_Kapoor/sequence_processing/raw_sequence_data_its_dwdmcb/rarefied_asv_tables_its/rare.asv.tab.its.2019.leaves.txt",header=TRUE,sep='\t')
+
+# Using the rarefy_formatting function to remove unrarefied leaf samples.
+rareasv.its.2019.leaves<-rarefy_formatting(rare.asv.tab.its.2019.leaves,11293)
+
+# Subsetting the metadata file to remove unrarefied samples. 
+met.rare.its.2019.leaves<-subset(met.its.leaves,met.its.leaves$Sample%in%rownames(rareasv.its.2019.leaves))
+
+# Converting treatment to a factor
+met.rare.its.2019.leaves$Treatment<-as.factor(met.rare.its.2019.leaves$Treatment)
+
+# Merging metadata into ASV table. 
+leaves.met.rareasv.its.2019<-merge(met.rare.its.2019.leaves,rareasv.its.2019.leaves,by.x="Sample",by.y=0)
+
+# Calculating sample distances using vegdist function from vegan. 
+distances_its_leaves<-vegdist(leaves.met.rareasv.its.2019[,6:length(leaves.met.rareasv.its.2019)],method="bray")
+
+# Testing homogeneity of variances using betadisper function
+beta_disper_model_its_leaves.treatment<-betadisper(distances_its_leaves,leaves.met.rareasv.its.2019$Treatment)
+anova(beta_disper_model_its_leaves.treatment)
+
+# Generating a PCoA plot using the pcoa_imager function
+leaves_its_2019<-pcoa_imager(leaves.met.rareasv.its.2019[,6:length(leaves.met.rareasv.its.2019)],method="bray",color=leaves.met.rareasv.its.2019$Treatment)+
+  labs(color="Treatment")+
+    geom_text(data=NULL,aes(x=-0.22,y=0.45,label="Leaf - Fungi",fontface="bold"),color="black",size=6)+
+  scale_color_manual(values=c("#00BFC4","#F8766D"))+
+    xlab("PC1 (36.1%)")+
+  ylab("PC2 (11.7%)")+
+  theme(axis.text = element_text(face="bold"),
+  axis.title = element_text(face="bold"),legend.text=element_text(size=15),legend.title=element_text(size=15))
+leaves_its_2019
+
+# Using the adonis function to perform a PERMANOVA. 
+adonis2(leaves.met.rareasv.its.2019[,6:length(leaves.met.rareasv.its.2019)]~leaves.met.rareasv.its.2019$Treatment)
+```
+
+
+```{r}
+# Using ggarrange to combine all fungal PCoAs into a figure for publication. 
+plant_niches_all_its<-ggarrange(its_2019_pcoa_plot.plant,nrow=1,ncol=1,labels=c("A"), common.legend = TRUE)
+
+individual_niches<-ggarrange(roots_its_2019,stem_its_2019,bark_its_2019,leaves_its_2019,common.legend = TRUE,nrow=2,ncol=2,labels=c("B","D","C","E"))
+
+plant_plot<-ggarrange(plant_niches_all_its,individual_niches,widths=c(1,1))
+
+#ggsave("/Volumes/Beant_Kapoor/Kapoor et al. 2021_Dogwwod Microbiome Manuscript_forest ecology/pcoa_its.eps",dpi=500,plant_plot,width=20,height=12,bg="white")
+```
+
+
+## Bacteria Beta Diversity
+```{r}
+# # Merging rarefied plant asv data with metadata using the merge function.
+plant.met.rareasv.16s.2019<-merge(met.rare.16s.2019.plant,rareasv.16s.2019.plant,by.x="Sample",by.y=0)
+
+# Calculating ASV relative abundance using the decostand function. 
+relabund.asv.plant.16s<-decostand(plant.met.rareasv.16s.2019[,6:length(plant.met.rareasv.16s.2019)], method="total")
+
+# Generating a PCoA plot using the pcoa_imager function
+bac_2019_pcoa_plot.plant<-pcoa_imager(plant.met.rareasv.16s.2019[,6:length(plant.met.rareasv.16s.2019)],method="bray",color=plant.met.rareasv.16s.2019$Niche,shape=plant.met.rareasv.16s.2019$Treatment)+
+  labs(shape="Treatment", color="Niche")+
+  geom_text(data=NULL,aes(x=-0.25,y=0.40,label='Plant - Bacteria/Archaea',fontface="bold"),color="black",size=6)+
+    xlab("PC1 (18.0%)")+
+  ylab("PC2 (8.1%)")+
+  theme(axis.text = element_text(face="bold"),
+  axis.title = element_text(face="bold"),legend.text=element_text(size=15),legend.title=element_text(size=15))
+
+bac_2019_pcoa_plot.plant
+
+# Calculating sample distances using the vegdist function.  
+distances_16s.plant<-vegdist(plant.met.rareasv.16s.2019[,6:length(plant.met.rareasv.16s.2019)])
+
+# Using the betadisper and anova functions to test for equality of variance between niches. 
+beta_disper_model_16s.plant.niche<-betadisper(distances_16s.plant,plant.met.rareasv.16s.2019$Niche)
+anova(beta_disper_model_16s.plant.niche)
+
+# Using the betadisper and anova functions to test for equality of variance between treatments. 
+beta_disper_model_16s.plant.treatment<-betadisper(distances_16s.plant,plant.met.rareasv.16s.2019$Treatment)
+anova(beta_disper_model_16s.plant.treatment)
+
+# Using the adonis function to perform a PERMANOVA
+adonis2(plant.met.rareasv.16s.2019[,6:length(plant.met.rareasv.16s.2019)]~plant.met.rareasv.16s.2019$Treatment*plant.met.rareasv.16s.2019$Niche)
+```
+
+## Roots Beta-Diversity
+
+```{r}
+# Subsetting the metadata file that contains only the root data. 
+met.16s.roots<-metadata_burn_16s[grep("Roots",metadata_burn_16s$Niche),]
+
+# Importing  the rarefied root ASV table. 
+rare.asv.tab.16s.2019.roots<-read.table("/Volumes/Beant_Kapoor/sequence_processing/raw_sequence_data_bac_dwdmcb/rarefied_asv_tables_16s/rare.asv.tab.16s.2019.roots.txt",header=TRUE,sep='\t')
+
+
+# Using the rarefy_formatting function to remove unrarefied root samples.
+rareasv.16s.2019.roots<-rarefy_formatting(rare.asv.tab.16s.2019.roots,3526)
+
+# Subsetting the metadata file to remove unrarefied samples. 
+met.rare.16s.2019.roots<-subset(met.16s.roots,met.16s.roots$Sample%in%rownames(rare.asv.tab.16s.2019.roots))
+
+# Converting treatment to a factor
+met.rare.16s.2019.roots$Treatment<-as.factor(met.rare.16s.2019.roots$Treatment)
+
+# Merging metadata into ASV table. 
+roots.met.rareasv.16s.2019<-merge(met.rare.16s.2019.roots,rareasv.16s.2019.roots,by.x="Sample",by.y=0)
+
+# Calculating sample distances using vegdist function from vegan. 
+distances_16s_roots<-vegdist(roots.met.rareasv.16s.2019[,6:length(roots.met.rareasv.16s.2019)],method="bray")
+
+# Testing homogeneity of variances using betadisper function
+beta_disper_model_16s_roots.treatment<-betadisper(distances_16s_roots,roots.met.rareasv.16s.2019$Treatment)
+anova(beta_disper_model_16s_roots.treatment)
+
+# Generating a PCoA plot using the pcoa_imager function
+roots_16s_2019<-pcoa_imager(roots.met.rareasv.16s.2019[,6:length(roots.met.rareasv.16s.2019)],method="bray",color=roots.met.rareasv.16s.2019$Treatment)+
+  labs(color="Treatment")+
+    geom_text(data=NULL,aes(x=-0.05,y=0.55,label="Roots - Bacteria/Archaea",fontface="bold"),color="black",size=6)+
+scale_color_manual(values=c("#00BFC4","#F8766D"))+
+  xlab("PC1 (17.0%)")+
+  ylab("PC2 (10.1%)")+
+  theme(axis.text = element_text(face="bold"),
+  axis.title = element_text(face="bold"),legend.text=element_text(size=15),legend.title=element_text(size=15))
+roots_16s_2019
+
+# Using the adonis function to perform a PERMANOVA. 
+adonis2(roots.met.rareasv.16s.2019[,6:length(roots.met.rareasv.16s.2019)]~roots.met.rareasv.16s.2019$Treatment)
+```
+
+## Bark Beta-Diversity
+```{r}
+# Subsetting the metadata file that contains only the bark data. 
+met.16s.bark<-metadata_burn_16s[grep("Bark",metadata_burn_16s$Niche),]
+
+# Importing  the rarefied bark ASV table. 
+rare.asv.tab.16s.2019.bark<-read.table("/Volumes/Beant_Kapoor/sequence_processing/raw_sequence_data_bac_dwdmcb/rarefied_asv_tables_16s/rare.asv.tab.16s.2019.bark.txt",header=TRUE,sep='\t')
+
+# Using the rarefy_formatting function to remove unrarefied bark samples.
+rareasv.16s.2019.bark<-rarefy_formatting(rare.asv.tab.16s.2019.bark,14919)
+
+# Subsetting the metadata file to remove unrarefied samples. 
+met.rare.16s.2019.bark<-subset(met.16s.bark,met.16s.bark$Sample%in%rownames(rareasv.16s.2019.bark))
+
+# Converting treatment to a factor
+met.rare.16s.2019.bark$Treatment<-as.factor(met.rare.16s.2019.bark$Treatment)
+
+# Merging metadata into ASV table. 
+bark.met.rareasv.16s.2019<-merge(met.rare.16s.2019.bark,rareasv.16s.2019.bark,by.x="Sample",by.y=0)
+
+# Calculating sample distances using vegdist function from vegan. 
+distances_16s_bark<-vegdist(bark.met.rareasv.16s.2019[,6:length(bark.met.rareasv.16s.2019)],method="bray")
+
+# Testing homogeneity of variances using betadisper function
+beta_disper_model_16s_bark.treatment<-betadisper(distances_16s_bark,bark.met.rareasv.16s.2019$Treatment)
+anova(beta_disper_model_16s_bark.treatment)
+
+# Generating a PCoA plot using the pcoa_imager function
+bark_16s_2019<-pcoa_imager(bark.met.rareasv.16s.2019[,6:length(bark.met.rareasv.16s.2019)],method="bray",color=bark.met.rareasv.16s.2019$Treatment)+
+  labs(color="Treatment")+
+    geom_text(data=NULL,aes(x=-0.1,y=0.35,label="Bark - Bacteria/Archaea",fontface="bold"),color="black",size=6)+
+  scale_color_manual(values=c("#00BFC4","#F8766D"))+
+  xlab("PC1 (16.5%)")+
+  ylab("PC2 (9.1%)")+
+  theme(axis.text = element_text(face="bold"),
+  axis.title = element_text(face="bold"),legend.text=element_text(size=15),legend.title=element_text(size=15))
+bark_16s_2019
+
+# Using the adonis function to perform a PERMANOVA. 
+adonis2(bark.met.rareasv.16s.2019[,6:length(bark.met.rareasv.16s.2019)]~bark.met.rareasv.16s.2019$Treatment)
+```
+
+## Stem Beta-Diversity
+```{r}
+# Subsetting the metadata file that contains only the stem data. 
+met.16s.stem<-metadata_burn_16s[grep("Stem",metadata_burn_16s$Niche),]
+
+# Importing  the rarefied stem ASV table. 
+rare.asv.tab.16s.2019.stem<-read.table("/Volumes/Beant_Kapoor/sequence_processing/raw_sequence_data_bac_dwdmcb/rarefied_asv_tables_16s/rare.asv.tab.16s.2019.stem.txt",header=TRUE,sep='\t')
+
+# Using the rarefy_formatting function to remove unrarefied stem samples.
+rareasv.16s.2019.stem<-rarefy_formatting(rare.asv.tab.16s.2019.stem,2640)
+
+# Subsetting the metadata file to remove unrarefied samples. 
+met.rare.16s.2019.stem<-subset(met.16s.stem,met.16s.stem$Sample%in%rownames(rareasv.16s.2019.stem))
+
+# Converting treatment to a factor
+met.rare.16s.2019.stem$Treatment<-as.factor(met.rare.16s.2019.stem$Treatment)
+
+# Merging metadata into ASV table. 
+stem.met.rareasv.16s.2019<-merge(met.rare.16s.2019.stem,rareasv.16s.2019.stem,by.x="Sample",by.y=0)
+
+# Calculating sample distances using vegdist function from vegan. 
+distances_16s_stem<-vegdist(stem.met.rareasv.16s.2019[,6:length(stem.met.rareasv.16s.2019)],method="bray")
+
+# Testing homogeneity of variances using betadisper function
+beta_disper_model_16s_stem.treatment<-betadisper(distances_16s_stem,stem.met.rareasv.16s.2019$Treatment)
+anova(beta_disper_model_16s_stem.treatment)
+
+# Generating a PCoA plot using the pcoa_imager function
+stem_16s_2019<-pcoa_imager(stem.met.rareasv.16s.2019[,6:length(stem.met.rareasv.16s.2019)],method="bray",color=stem.met.rareasv.16s.2019$Treatment)+
+  labs(color="Treatment")+
+  geom_text(data=NULL,aes(x=-0.10,y=0.3,label="Stem - Bacteria/Archaea",fontface="bold"),color="black",size=6)+
+  scale_color_manual(values=c("#00BFC4","#F8766D"))+
+  xlab("PC1 (34.9%)")+
+  ylab("PC2 (9.6%)")+
+  theme(axis.text = element_text(face="bold"),
+  axis.title = element_text(face="bold"),legend.text=element_text(size=15),legend.title=element_text(size=15))
+stem_16s_2019
+
+# Using the adonis function to perform a PERMANOVA. 
+adonis2(stem.met.rareasv.16s.2019[,6:length(stem.met.rareasv.16s.2019)]~stem.met.rareasv.16s.2019$Treatment)
+```
+
+## Leaf Beta-Diversity
+
+```{r}
+# Subsetting the metadata file that contains only the leaf data. 
+met.16s.leaves<-metadata_burn_16s[grep("Leaves",metadata_burn_16s$Niche),]
+
+# Importing  the rarefied leaf ASV table. 
+rare.asv.tab.16s.2019.leaves<-read.table("/Volumes/Beant_Kapoor/sequence_processing/raw_sequence_data_bac_dwdmcb/rarefied_asv_tables_16s/rare.asv.tab.16s.2019.leaves.txt",header=TRUE,sep='\t')
+
+# Using the rarefy_formatting function to remove unrarefied leaf samples.
+rareasv.16s.2019.leaves<-rarefy_formatting(rare.asv.tab.16s.2019.leaves,1034)
+
+# Subsetting the metadata file to remove unrarefied samples. 
+met.rare.16s.2019.leaves<-subset(met.16s.leaves,met.16s.leaves$Sample%in%rownames(rareasv.16s.2019.leaves))
+
+# Converting treatment to a factor
+met.rare.16s.2019.leaves$Treatment<-as.factor(met.rare.16s.2019.leaves$Treatment)
+
+# Merging metadata into ASV table. 
+leaves.met.rareasv.16s.2019<-merge(met.rare.16s.2019.leaves,rareasv.16s.2019.leaves,by.x="Sample",by.y=0)
+
+# Calculating sample distances using vegdist function from vegan. 
+distances_16s_leaves<-vegdist(leaves.met.rareasv.16s.2019[,6:length(leaves.met.rareasv.16s.2019)],method="bray")
+
+# Testing homogeneity of variances using betadisper function
+beta_disper_model_16s_leaves.treatment<-betadisper(distances_16s_leaves,leaves.met.rareasv.16s.2019$Treatment)
+anova(beta_disper_model_16s_leaves.treatment)
+
+# Generating a PCoA plot using the pcoa_imager function
+leaves_16s_2019<-pcoa_imager(leaves.met.rareasv.16s.2019[,6:length(leaves.met.rareasv.16s.2019)],method="bray",color=leaves.met.rareasv.16s.2019$Treatment)+
+  labs(color="Treatment")+
+    geom_text(data=NULL,aes(x=-0.12,y=0.35,label="Leaf - Bacteria/Archaea",fontface="bold"),color="black",size=6)+
+  scale_color_manual(values=c("#00BFC4","#F8766D"))+
+  xlab("PC1 (23.1%)")+
+  ylab("PC2 (11.5%)")+
+  theme(axis.text = element_text(face="bold"),
+  axis.title = element_text(face="bold"),legend.text=element_text(size=15),legend.title=element_text(size=15))
+
+leaves_16s_2019
+
+# Using the adonis function to perform a PERMANOVA. 
+adonis2(leaves.met.rareasv.16s.2019[,6:length(leaves.met.rareasv.16s.2019)]~leaves.met.rareasv.16s.2019$Treatment)
+```
+
+
+```{r}
+# Using ggarrange to organize PCoA plots into a figure for publication.
+plant_niches_all_16s<-ggarrange(bac_2019_pcoa_plot.plant,nrow=1,ncol=1,labels=c("A"), common.legend = TRUE)
+
+individual_niches_16s<-ggarrange(roots_16s_2019,stem_16s_2019,bark_16s_2019,leaves_16s_2019,common.legend = TRUE,nrow=2,ncol=2,labels=c("B","D","C","E"))
+
+plant_plot_16s<-ggarrange(plant_niches_all_16s,individual_niches_16s,widths=c(1,1))
+
+#ggsave("/Volumes/Beant_Kapoor/Kapoor et al. 2021_Dogwwod Microbiome Manuscript_forest ecology/pcoa_16s.eps",plant_plot_16s,width=20,height=12,bg="white",dpi=500)
+```
+
+
+## Soil Fungal Beta-Diversity
+```{r}
+# Merging metadata into ASV table. . 
+soil.met.rareasv.its.2019<-merge(met.rare.its.2019.soil,rareasv.its.2019.soil,by.x="Sample",by.y=0)
+
+# Calculating sample distances using vegdist function from vegan. 
+distances_its_soil<-vegdist(soil.met.rareasv.its.2019[,6:length(soil.met.rareasv.its.2019)],method="bray")
+
+# Testing homogeneity of variances using betadisper function
+beta_disper_model_its_soil.treatment<-betadisper(distances_its_soil,soil.met.rareasv.its.2019$Treatment)
+anova(beta_disper_model_its_soil.treatment)
+
+# Generating a PCoA plot using the pcoa_imager function
+soil_its_2019<-pcoa_imager(soil.met.rareasv.its.2019[,6:length(soil.met.rareasv.its.2019)],method="bray",color=soil.met.rareasv.its.2019$Treatment)+
+  labs(color="Treatment")+
+    geom_text(data=NULL,aes(x=-0.25,y=0.37,label='Soil - Fungi',fontface="bold"),color="black",size=6)+
+  scale_color_manual(values=c("#00BFC4","#F8766D"))+
+  xlab("PC1 (8.4%)")+
+  ylab("PC2 (7.9%)")+
+  theme(axis.text = element_text(face="bold"),
+  axis.title = element_text(face="bold"),legend.text=element_text(size=15),legend.title=element_text(size=15))
+  
+soil_its_2019
+
+
+# Using the adonis function to perform a PERMANOVA. 
+adonis2(soil.met.rareasv.its.2019[,6:length(soil.met.rareasv.its.2019)]~soil.met.rareasv.its.2019$Treatment)
+```
+
+## Soil Bacteria Beta Diversity
+```{r}
+# Merging metadata into ASV table. 
+soil.met.rareasv.16s.2019<-merge(met.rare.16s.2019.soil,rareasv.16s.2019.soil,by.x="Sample",by.y=0)
+
+# Calculating sample distances using vegdist function from vegan. 
+distances_16s_soil<-vegdist(soil.met.rareasv.16s.2019[,6:length(soil.met.rareasv.16s.2019)],method="bray")
+
+# Testing homogeneity of variances using betadisper function
+beta_disper_model_16s_soil.treatment<-betadisper(distances_16s_soil,soil.met.rareasv.16s.2019$Treatment)
+anova(beta_disper_model_16s_soil.treatment)
+
+# Generating a PCoA plot using the pcoa_imager function
+soil_16s_2019<-pcoa_imager(soil.met.rareasv.16s.2019[,6:length(soil.met.rareasv.16s.2019)],method="bray",color=soil.met.rareasv.16s.2019$Treatment)+
+  labs(color="Treatment")+
+     geom_text(data=NULL,aes(x=-0.15,y=0.3,label='Soil - Bacteria/Archaea',fontface="bold"),color="black",size=6)+
+  scale_color_manual(values=c("#00BFC4","#F8766D"))+
+  xlab("PC1 (15.7%)")+
+  ylab("PC2 (11.5%)")+
+  theme(axis.text = element_text(face="bold"),
+  axis.title = element_text(face="bold"),legend.text=element_text(size=15),legend.title=element_text(size=15))
+  
+soil_16s_2019
+
+# Using the adonis function to perform a PERMANOVA. 
+adonis2(soil.met.rareasv.16s.2019[,6:length(soil.met.rareasv.16s.2019)]~soil.met.rareasv.16s.2019$Treatment)
+```
+
+
+```{r}
+# Using ggarrange to organize PCoA plots into a figure for publication. 
+soil_pcoas<-ggarrange(soil_its_2019,soil_16s_2019,labels=c("A","B"), common.legend = TRUE,ncol=2)
+
+#ggsave("/Volumes/Beant_Kapoor/Kapoor et al. 2021_Dogwwod Microbiome Manuscript_forest ecology/soil_pcoas.eps",soil_pcoas,width=20,height=12,dpi=500,bg="white")
+```
+
+# Soil Chemical Constrained Analyses
+
+```{r}
+# Importing soil chemical data from Brookside Labs
+soil_nutrient<-read.table("/Volumes/Beant_Kapoor/sequence_processing/soil_nutrient_metadata.txt",sep='\t',header=TRUE)
+```
+
+
+```{r}
+# Omitting Al and Na from following analyses. Not of interest and don't meet parametric assumptions. 
+
+soil_nutrient<-soil_nutrient[grep("Na",colnames(soil_nutrient),invert=TRUE)]
+soil_nutrient<-soil_nutrient[grep("Al",colnames(soil_nutrient),invert=TRUE)]
+```
+
+## PCA 16S
+
+```{r}
+# Removing the _ from sample names to conform to other metadata files. 
+soil_nutrient$Sample<-sub("_CF_","CF",soil_nutrient$Sample)
+
+# Using grep to pull out only 2019 soil chemistry data. 
+soil_nutrient_2019<-soil_nutrient[grep("2019",soil_nutrient$Year),]
+
+# Using substitute to remove "_Post" from treatment names in treatment column. 
+soil_nutrient_2019$Treatment<-sub("_Post","",soil_nutrient_2019$Treatment)
+
+# Using sub to change "Burned" to "Prescribed Burn" to match other data files. 
+soil_nutrient_2019$Treatment<-sub("Burned","Prescribed Burn",soil_nutrient_2019$Treatment)
+
+# Making row names the sample names. 
+row.names(soil_nutrient_2019)<-make.names(soil_nutrient_2019$Sample)
+
+# Removing the X's that appear in sample names as a result of sample names beginning with a number.
+row.names(soil_nutrient_2019)<-sub("X","",row.names(soil_nutrient_2019))
+
+# Removing non-numeric data from soil data frame. 
+x_soil_nutrient_2019<-soil_nutrient_2019[,5:length(soil_nutrient_2019)]
+
+# Scaling and centering data prior to PCA analysis. 
+scale_x_soil_nutrient_2019<-scale(x_soil_nutrient_2019,scale=TRUE,center=TRUE)
+
+# Setting seed to get consistent results. 
+set.seed(201)
+
+#Perform PCA using prcomp function of factoextra package. Scale and center are set to false since variables have already been scaled and centered. 
+soil_pca<-prcomp(scale_x_soil_nutrient_2019, scale=FALSE, center=FALSE)
+
+# Using the fviz_eig function to identify eigen values of each principal component. 
+fviz_eig(soil_pca)[1]
+
+# Investigating how each soil property loads on the first two principal components. 
+fviz_contrib(soil_pca, choice="var", axes=1, top=10)
+fviz_contrib(soil_pca, choice="var", axes=2, top=10)
+
+# Creating a data frame that consists of the first two PCs. 
+soil_pca_frame<-data.frame(PC1=scores(soil_pca)[,1],PC2=scores(soil_pca)[,2])
+
+# Merging in metadata
+soil_pca_frame_meta<-merge(soil_nutrient_2019,soil_pca_frame,by=0)
+
+# Creating a data frame that contains the eigenvectors from the PCA.
+soil.pca.arrows<-as.data.frame(soil_pca$rotation[,1:2])
+
+# Creating an object that contains only the eigenvector labels. 
+soil.pca.arrows.labels<-labels(soil.pca.arrows)[[1]]
+
+# Determining what factor to use to adjust arrow length for plotting eigenvectors in ggplot. 
+soil.pca.arrowmult<-vegan::ordiArrowMul(scores(soil_pca$rotation[,1:2]))
+soil.pca.arrowmult
+
+# Generating standard deviation ellipses for PCA by treatment. 
+soil.pca.ellipse<-ordiellipse(soil_pca_frame_meta[,19:20],soil_pca_frame_meta$Treatment, display="sites", kind="sd")
+
+ell_pca_soil <- data.frame()
+for(g in levels(as.factor(soil_pca_frame_meta$Treatment))){
+ell_pca_soil <- rbind(ell_pca_soil, cbind(as.data.frame(with(soil_pca_frame_meta[soil_pca$Treatment==g,],                                                vegan:::veganCovEllipse(soil.pca.ellipse[[g]]$cov,soil.pca.ellipse[[g]]$center,soil.pca.ellipse[[g]]$scale))) ,Treatment=g))}
+
+# Plotting PCA using ggplot and fviz_pca_biplot
+soil_pca_biplot<-fviz_pca_biplot(soil_pca,col.ind = soil_nutrient_2019$Treatment,col.var = "black",label = "var",invisible = "quali",axes.linetype=NA,geom.ind = FALSE,repel = TRUE)+
+geom_point(aes(color=soil_nutrient_2019$Treatment),size=3)+
+  theme(panel.grid.major=element_blank(),
+       panel.grid.minor=element_blank(),
+       panel.background = element_blank(),
+  panel.border=element_rect(color="black", size=1, fill=NA))+
+  geom_path(data=ell_pca_soil, aes(x=PC1, y=PC2, colour=Treatment),size=0.5, linetype=1)+
+    theme(axis.title.x=element_text(size=14, face="bold"))+
+  theme(axis.title.y=element_text(size=14, face="bold"))+
+  theme(axis.text.x=element_text(size=12, face="bold"))+
+  theme(axis.text.y=element_text(size=12, face="bold"))+
+    geom_hline(yintercept=0,size=0.02)+
+  geom_vline(xintercept=0,size=0.02)+
+  guides(fill=guide_legend(title="Treatment"))+
+  xlab("PC1 (30.9%)")+
+  ylab("PC2 (24.3%)")+
+  ggtitle(NULL)+
+  labs(color="Treatment")+
+  scale_color_manual(values=c("#00BFC4","#F8766D"))+
+  theme(axis.text = element_text(face="bold"),
+  axis.title = element_text(face="bold"),legend.text=element_text(size=15),legend.title=element_text(size=15))
+
+soil_pca_biplot
+
+# Testing homogeneity of variance using betadisper function
+beta_disper_soil_nutrients<-betadisper(vegdist(soil_nutrient_2019[,5:17],method="euclidean"),soil_nutrient_2019$Treatment)
+anova(beta_disper_soil_nutrients)
+
+# Testing for significant differences between treatments using adonis for PERMANOVA
+adonis2(soil_nutrient_2019[,5:17]~soil_nutrient_2019$Treatment,dist="eu")
+
+#ggsave("/Volumes/Beant_Kapoor/Kapoor et al. 2021_Dogwwod Microbiome Manuscript_forest ecology/soil_pca_biplot.pdf",soil_pca_biplot,bg="white",height=10,width=10)
+```
+
+# Soil Chemical Analyses t.tests
+
+```{r}
+# Using t.test functions followed by shapiro.test and leveneTest to conduct two sample t.tests and test model assumptions. If a significant difference is detected then a box plot is generated using ggplot. 
+
+# TEC
+tec.soil.t.test.2019<-t.test(TEC~Treatment,data=soil_nutrient_2019,var.equal=TRUE)
+tec.soil.t.test.2019
+
+shapiro.test(soil_nutrient_2019$TEC)
+leveneTest(soil_nutrient_2019$TEC,group =soil_nutrient_2019$Treatment)
+
+# pH
+ph.soil.t.test.2019<-t.test(pH~Treatment,data=soil_nutrient_2019,var.equal=TRUE)
+ph.soil.t.test.2019
+
+shapiro.test(soil_nutrient_2019$pH)
+leveneTest(soil_nutrient_2019$pH,group =soil_nutrient_2019$Treatment)
+
+# OM
+om.soil.t.test.2019<-t.test(OM~Treatment,data=soil_nutrient_2019,var.equal=TRUE)
+om.soil.t.test.2019
+
+shapiro.test(soil_nutrient_2019$OM)
+leveneTest(soil_nutrient_2019$OM,group =soil_nutrient_2019$Treatment )
+
+# S
+s.soil.t.test.2019<-t.test(log(S)~Treatment,data=soil_nutrient_2019,var.equal=TRUE)
+s.soil.t.test.2019
+
+shapiro.test(log(soil_nutrient_2019$S))
+leveneTest(log(soil_nutrient_2019$S),group =soil_nutrient_2019$Treatment)
+
+# P
+p.soil.t.test.2019<-t.test((P)~Treatment,data=soil_nutrient_2019,var.equal=TRUE)
+p.soil.t.test.2019
+
+shapiro.test((soil_nutrient_2019$P))
+leveneTest((soil_nutrient_2019$P),group =soil_nutrient_2019$Treatment)
+
+# Ca
+ca.soil.t.test.2019<-t.test((Ca)~Treatment,data=soil_nutrient_2019,var.equal=TRUE)
+ca.soil.t.test.2019
+
+shapiro.test((soil_nutrient_2019$Ca))
+leveneTest((soil_nutrient_2019$Ca),group =soil_nutrient_2019$Treatment)
+
+# Mg
+mg.soil.t.test.2019<-t.test((Mg)~Treatment,data=soil_nutrient_2019,var.equal=TRUE)
+mg.soil.t.test.2019
+
+shapiro.test((soil_nutrient_2019$Mg))
+leveneTest((soil_nutrient_2019$Mg),group =soil_nutrient_2019$Treatment)
+
+# K
+k.soil.t.test.2019<-t.test((K)~Treatment,data=soil_nutrient_2019,var.equal=TRUE)
+k.soil.t.test.2019
+
+shapiro.test((soil_nutrient_2019$K))
+leveneTest((soil_nutrient_2019$K),group =soil_nutrient_2019$Treatment)
+
+k.soil.plot<-ggplot(soil_nutrient_2019, aes(x=Treatment, y=K, outlier.shape=NA,color=Treatment))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_point(position = position_jitterdodge())+
+  xlab("Treatment")+
+  ylab(bquote("K (mg/mL)"))+
+  theme(panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+    panel.border=element_rect(colour="black", size=1, fill=NA))+
+  theme(panel.grid.major=element_blank(),
+       panel.grid.minor=element_blank(),
+       panel.background = element_blank(),
+  panel.border=element_rect(color="black", size=1, fill=NA))+
+  geom_text(data=NULL,aes(x=1,y=55,label="A"),color="black")+
+  geom_text(data=NULL,aes(x=2,y=55,label="B"),color="black")+
+  scale_color_manual(values=c("#00BFC4","#F8766D"))
+k.soil.plot
+
+# Fe
+fe.soil.t.test.2019<-t.test((Fe)~Treatment,data=soil_nutrient_2019,var.equal=TRUE)
+fe.soil.t.test.2019
+
+shapiro.test((soil_nutrient_2019$Fe))
+leveneTest((soil_nutrient_2019$Fe),group =soil_nutrient_2019$Treatment)
+
+# Mn
+mn.soil.t.test.2019<-t.test(log(Mn)~Treatment,data=soil_nutrient_2019,var.equal=TRUE)
+mn.soil.t.test.2019
+
+shapiro.test(log(soil_nutrient_2019$Mn))
+leveneTest(log(soil_nutrient_2019$Mn),group =soil_nutrient_2019$Treatment)
+
+# Cu
+cu.soil.t.test.2019<-t.test(log(Cu)~Treatment,data=soil_nutrient_2019,var.equal=TRUE)
+cu.soil.t.test.2019
+
+shapiro.test(log(soil_nutrient_2019$Cu))
+leveneTest(log(soil_nutrient_2019$Cu),group =soil_nutrient_2019$Treatment)
+
+# Zn
+zn.soil.t.test.2019<-t.test((Zn)~Treatment,data=soil_nutrient_2019,var.equal=TRUE)
+zn.soil.t.test.2019
+
+shapiro.test((soil_nutrient_2019$Zn))
+leveneTest((soil_nutrient_2019$Zn),group =soil_nutrient_2019$Treatment)
+
+# NH4.N
+nh4.n.soil.t.test.2019<-t.test((NH4)~Treatment,data=soil_nutrient_2019,var.equal=TRUE)
+nh4.n.soil.t.test.2019
+
+shapiro.test((soil_nutrient_2019$NH4))
+leveneTest((soil_nutrient_2019$NH4),group =soil_nutrient_2019$Treatment)
+
+nh4.soil.plot<-ggplot(soil_nutrient_2019, aes(x=Treatment, y=NH4, outlier.shape=NA,color=Treatment))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_point(position = position_jitterdodge())+
+  xlab("Treatment")+
+  ylab(bquote("NH4 (mg/mL)"))+
+  theme(panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+    panel.border=element_rect(colour="black", size=1, fill=NA))+
+  theme(panel.grid.major=element_blank(),
+       panel.grid.minor=element_blank(),
+       panel.background = element_blank(),
+  panel.border=element_rect(color="black", size=1, fill=NA))+
+    geom_text(data=NULL,aes(x=1,y=23,label="A"),color="black")+
+  geom_text(data=NULL,aes(x=2,y=23,label="B"),color="black")+
+  scale_color_manual(values=c("#00BFC4","#F8766D"))
+
+nh4.soil.plot
+
+# Arranging the K and NH4 plots into a single figure for publication. 
+k_nh4.n_plot<-ggarrange(k.soil.plot,nh4.soil.plot,common.legend = TRUE,labels=c("A","B"))
+
+#ggsave("/Volumes/Beant_Kapoor/Kapoor et al. 2021_Dogwwod Microbiome Manuscript_forest ecology/k_nh4.n_plot.tiff",k_nh4.n_plot,dpi=300,bg='white')
+```
+
+## Soil-Root dbRDA
+
+```{r}
+# Creating a new object for soil nutrient data. 
+soil_nutrient_2019_roots<-soil_nutrient_2019
+
+# Pasting '216S' so that soil data can be merged into root ASV table by sample name. 
+soil_nutrient_2019_roots$Sample<-paste(soil_nutrient_2019$Sample,'216S',sep='')
+
+# Converting row names into sample names.
+row.names(soil_nutrient_2019_roots)<-make.names(soil_nutrient_2019_roots$Sample)
+
+# Removing "X" that appears in row names as a result of sample names starting with numbers. 
+row.names(soil_nutrient_2019_roots)<-sub("X","",row.names(soil_nutrient_2019_roots))
+
+# Removing "_" from sample names to allow for merging. 
+row.names(soil_nutrient_2019_roots)<-sub("_CF_","CF",row.names(soil_nutrient_2019_roots))
+
+# Stripping out non-numeric data from soil data. 
+x_soil_nutrient_2019_roots<-soil_nutrient_2019_roots[,5:length(soil_nutrient_2019_roots)]
+
+# Merging root ASV table with soil data using sample names. 
+soil_nutrient_rare_met_16s_roots<-merge(x_soil_nutrient_2019_roots,roots.met.rareasv.16s.2019,by.x=0,by.y="Sample")
+
+# Converting row names into sample names.
+row.names(soil_nutrient_rare_met_16s_roots)<-make.names(soil_nutrient_rare_met_16s_roots$Row.names)
+
+# Removing "X" that appears in row names as a result of sample names starting with numbers. 
+rownames(soil_nutrient_rare_met_16s_roots)<-sub("X","",rownames(soil_nutrient_rare_met_16s_roots))
+
+# Conducting dbRDA using dbrda function
+soil_root_bac_dbrda<-vegan::dbrda(soil_nutrient_rare_met_16s_roots[,21:length(soil_nutrient_rare_met_16s_roots)]~.,soil_nutrient_rare_met_16s_roots[,2:14],distance="bray")
+
+# Using vif.cca to calculate variance inflation factor of whole model. 
+vif.cca(soil_root_bac_dbrda)
+
+# Using par to reset figure row displays to 1 x 1. 
+par(mfrow=c(1,1))
+
+# Generating a correlation plot to identify highly correlated variables
+corrplot(cor(soil_nutrient_rare_met_16s_roots[,2:14]),method = "number")
+
+# Generating a subset soil nutrient data frame with highly correlated variables removed to limit effects of multi-collinearity in dbRDA. 
+soil_nutrient_sub<-data.frame(sample=soil_nutrient_rare_met_16s_roots$Row.names,pH=soil_nutrient_rare_met_16s_roots$pH,OM=soil_nutrient_rare_met_16s_roots$OM,Ca=soil_nutrient_rare_met_16s_roots$Ca,Mg=soil_nutrient_rare_met_16s_roots$Mg,K=soil_nutrient_rare_met_16s_roots$K,NH4=soil_nutrient_rare_met_16s_roots$NH4,Cu=soil_nutrient_rare_met_16s_roots$Cu,Mn=soil_nutrient_rare_met_16s_roots$Mn,Fe=soil_nutrient_rare_met_16s_roots$Fe)
+
+# Merging subset soil data with roots ASV table.
+roots_properties_asvs<-merge(soil_nutrient_sub,roots.met.rareasv.16s.2019,by.x="sample",by.y="Sample")
+
+# Converting row names to sample names
+row.names(roots_properties_asvs)<-make.names(roots_properties_asvs$sample)
+
+# Removing "X" that appears in row names as a result of sample names starting with numbers. 
+rownames(roots_properties_asvs)<-sub("X","",rownames(roots_properties_asvs))
+
+# Conducting dbrda with subset soil data
+soil_roots_bac_dbrda_sub<-vegan::dbrda(roots_properties_asvs[,15:length(roots_properties_asvs)]~.,roots_properties_asvs[,2:10],distance="bray")
+
+# Creating a dbrda biplot
+plot(soil_roots_bac_dbrda_sub)
+
+# Testing significance of model terms and axes. 
+anova(soil_roots_bac_dbrda_sub,by="margin")
+anova(soil_roots_bac_dbrda_sub,by="axis")
+
+# Generating a data frame that contains only dbrda site scores
+soil.roots.bac.dbrda.sitescore<-vegan::scores(soil_roots_bac_dbrda_sub, display=c("sites","bp"))
+
+# Extraction only first 2 axes of dbrda
+soil.roots.bac.dbrda.graph<-data.frame(dbRDA1=soil.roots.bac.dbrda.sitescore$sites[,1], dbRDA2=soil.roots.bac.dbrda.sitescore$sites[,2])
+
+# Merging first 2 axes score with metadata. 
+soil.roots.bac.dbrda.graph<-merge(soil.roots.bac.dbrda.graph,met.rare.16s.2019.roots,by.x="row.names",by.y="Sample")
+
+# Extraction eigenvectors and storing them in a data frame.
+soil.roots.bac.dbrda.arrows<-as.data.frame(soil.roots.bac.dbrda.sitescore$biplot)
+
+# Extraction eigen vector labels.
+soil.roots.bac.dbrda.arrows.labels<-labels(soil.roots.bac.dbrda.arrows)
+
+# Determining what factor to multiply eigenvectors by for plotting in ggplot.
+soil.roots.bac.arrowmult<-vegan::ordiArrowMul(scores(soil.roots.bac.dbrda.sitescore$biplot))
+soil.roots.bac.arrowmult
+
+# Generating standard deviation elipses by treatment
+soil.roots.bac.dbrda.ellipse<-ordiellipse(soil.roots.bac.dbrda.sitescore,soil.roots.bac.dbrda.graph$Treatment, display="sites", kind="sd",draw="none")
+
+ell_roots_soil <- data.frame()
+for(g in levels(as.factor(soil.roots.bac.dbrda.graph$Treatment))){
+ell_roots_soil <- rbind(ell_roots_soil, cbind(as.data.frame(with(soil.roots.bac.dbrda.graph[soil_roots_bac_dbrda_sub$Treatment==g,],                                                vegan:::veganCovEllipse(soil.roots.bac.dbrda.ellipse[[g]]$cov,soil.roots.bac.dbrda.ellipse[[g]]$center,soil.roots.bac.dbrda.ellipse[[g]]$scale))) ,Treatment=g))}
+
+# Plotting dbrda biplot in ggplot
+roots_soil_dbrda<-ggplot(soil.roots.bac.dbrda.graph, aes(dbRDA1,dbRDA2, colour=Treatment))+
+     geom_point(size=3)+
+geom_path(data=ell_roots_soil, aes(x=dbRDA1, y=dbRDA2, colour=Treatment),size=0.5, linetype=1)+
+  theme(panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+    panel.border=element_rect(colour="black", size=1, fill=NA))+
+  theme(axis.title.x=element_text(size=14, face="bold"))+
+  theme(axis.title.y=element_text(size=14, face="bold"))+
+  theme(axis.text.x=element_text(size=12, face="bold"))+
+  theme(axis.text.y=element_text(size=12, face="bold"))+
+  theme(panel.grid.major=element_blank(),
+       panel.grid.minor=element_blank(),
+       panel.background = element_blank(),
+  panel.border=element_rect(color="black", size=1, fill=NA))+
+geom_segment(data=soil.roots.bac.dbrda.arrows,aes(x=0, xend=dbRDA1[1]*soil.roots.bac.arrowmult,y=0, yend=dbRDA2[1]*soil.roots.bac.arrowmult),inherit.aes = FALSE,arrow =arrow(length = unit(0.25, "cm")), size=0.35,linetype=1, colour="grey")+
+  geom_text(data=soil.roots.bac.dbrda.arrows,aes(x=dbRDA1[1]*soil.roots.bac.arrowmult*1.2,y=dbRDA2[1]*soil.roots.bac.arrowmult*1.2,label="pH"),inherit.aes = FALSE,color="grey")+
+geom_segment(data=soil.roots.bac.dbrda.arrows,aes(x=0, xend=dbRDA1[2]*soil.roots.bac.arrowmult,y=0, yend=dbRDA2[2]*soil.roots.bac.arrowmult),inherit.aes = FALSE,arrow =arrow(length = unit(0.25, "cm")), size=0.35,linetype=1, colour="grey")+
+  geom_text(data=soil.roots.bac.dbrda.arrows,aes(x=dbRDA1[2]*soil.roots.bac.arrowmult*1.2,y=dbRDA2[2]*soil.roots.bac.arrowmult*1.2,label="OM"),inherit.aes = FALSE,color="grey")+
+  
+  geom_segment(data=soil.roots.bac.dbrda.arrows,aes(x=0, xend=dbRDA1[3]*soil.roots.bac.arrowmult,y=0, yend=dbRDA2[3]*soil.roots.bac.arrowmult),inherit.aes = FALSE,arrow =arrow(length = unit(0.25, "cm")), size=0.35,linetype=1, colour="grey")+
+  geom_text(data=soil.roots.bac.dbrda.arrows,aes(x=dbRDA1[3]*soil.roots.bac.arrowmult*1.07,y=dbRDA2[3]*soil.roots.bac.arrowmult*1.07,label="Ca"),inherit.aes = FALSE,color="grey")+
+  
+  geom_segment(data=soil.roots.bac.dbrda.arrows,aes(x=0, xend=dbRDA1[4]*soil.roots.bac.arrowmult,y=0, yend=dbRDA2[4]*soil.roots.bac.arrowmult),inherit.aes = FALSE,arrow =arrow(length = unit(0.25, "cm")), size=0.35,linetype=1, colour="grey")+
+  geom_text(data=soil.roots.bac.dbrda.arrows,aes(x=dbRDA1[4]*soil.roots.bac.arrowmult*1.07,y=dbRDA2[4]*soil.roots.bac.arrowmult*1.07,label="Mg"),inherit.aes = FALSE,color="grey")+
+  
+    geom_segment(data=soil.roots.bac.dbrda.arrows,aes(x=0, xend=dbRDA1[5]*soil.roots.bac.arrowmult,y=0, yend=dbRDA2[5]*soil.roots.bac.arrowmult),inherit.aes = FALSE,arrow =arrow(length = unit(0.25, "cm")), size=0.35,linetype=1, colour="grey")+
+  geom_text(data=soil.roots.bac.dbrda.arrows,aes(x=dbRDA1[5]*soil.roots.bac.arrowmult*1.07,y=dbRDA2[5]*soil.roots.bac.arrowmult*1.07,label="K"),inherit.aes = FALSE,color="grey")+
+  
+   geom_segment(data=soil.roots.bac.dbrda.arrows,aes(x=0, xend=dbRDA1[6]*soil.roots.bac.arrowmult,y=0, yend=dbRDA2[6]*soil.roots.bac.arrowmult),inherit.aes = FALSE,arrow =arrow(length = unit(0.25, "cm")), size=0.35,linetype=1, colour="black")+
+  geom_text(data=soil.roots.bac.dbrda.arrows,aes(x=dbRDA1[6]*soil.roots.bac.arrowmult*1.15,y=dbRDA2[6]*soil.roots.bac.arrowmult*1.15,label="NH4"),inherit.aes = FALSE,color="black")+
+  
+  
+  geom_segment(data=soil.roots.bac.dbrda.arrows,aes(x=0, xend=dbRDA1[7]*soil.roots.bac.arrowmult,y=0, yend=dbRDA2[7]*soil.roots.bac.arrowmult),inherit.aes = FALSE,arrow =arrow(length = unit(0.25, "cm")), size=0.35,linetype=1, colour="grey")+
+  geom_text(data=soil.roots.bac.dbrda.arrows,aes(x=dbRDA1[7]*soil.roots.bac.arrowmult*1.07,y=dbRDA2[7]*soil.roots.bac.arrowmult*1.07,label="Cu"),inherit.aes = FALSE,color="grey")+
+  
+  geom_segment(data=soil.roots.bac.dbrda.arrows,aes(x=0, xend=dbRDA1[8]*soil.roots.bac.arrowmult,y=0, yend=dbRDA2[8]*soil.roots.bac.arrowmult),inherit.aes = FALSE,arrow =arrow(length = unit(0.25, "cm")), size=0.35,linetype=1, colour="grey")+
+  geom_text(data=soil.roots.bac.dbrda.arrows,aes(x=dbRDA1[8]*soil.roots.bac.arrowmult*1.07,y=dbRDA2[8]*soil.roots.bac.arrowmult*1.07,label="Mn"),inherit.aes = FALSE,color="grey")+
+  
+    geom_segment(data=soil.roots.bac.dbrda.arrows,aes(x=0, xend=dbRDA1[9]*soil.roots.bac.arrowmult,y=0, yend=dbRDA2[9]*soil.roots.bac.arrowmult),inherit.aes = FALSE,arrow =arrow(length = unit(0.25, "cm")), size=0.35,linetype=1, colour="grey")+
+  geom_text(data=soil.roots.bac.dbrda.arrows,aes(x=dbRDA1[9]*soil.roots.bac.arrowmult*1.07,y=dbRDA2[9]*soil.roots.bac.arrowmult*1.07,label="Fe"),inherit.aes = FALSE,color="grey")+
+  
+  geom_hline(yintercept=0,size=0.02)+
+  geom_vline(xintercept=0,size=0.02)+
+    scale_color_manual(values=c("#00BFC4","#F8766D"))+
+  theme(axis.text = element_text(face="bold"),
+  axis.title = element_text(face="bold"),legend.text=element_text(size=15),legend.title=element_text(size=15))
+
+roots_soil_dbrda
+
+#ggsave("/Volumes/Beant_Kapoor/Kapoor et al. 2021_Dogwwod Microbiome Manuscript_forest ecology/bac_roots_cca.eps",roots_soil_cca,width=10,height=10,dpi=500)
+```
+
+# DESeq2 Analysis
+```{r}
+# Importing merged taxonomy and asv tabl.
+t.seqtab.tax.16s<-read.table('/Volumes/Beant_Kapoor/sequence_processing/raw_sequence_data_bac_dwdmcb/t.seqtab.tax.16s.txt',header=TRUE,sep='\t')
+
+# Transposig data
+seqtab.tax.16s<-as.data.frame(t(t.seqtab.tax.16s))
+
+# Removing "X" from row names as a product of sample names starting numerically.
+row.names(seqtab.tax.16s)<-sub("X","",row.names(seqtab.tax.16s))
+
+# Subsetting asv table so that only 2019 data is included. 
+asv.tab.16s.2019<-seqtab.tax.16s[1:100,]
+
+# Subsetting data so that only taxonomy information is included. 
+asv_taxonomy.16s<-t(seqtab.tax.16s[101:107,])
+
+# Pulling out only root samples using grep
+metadata_burn_roots_16s<-metadata_burn_16s[grep("Roots",metadata_burn_16s$Niche),]
+
+# Subsetting ASV data so that only root data is included. 
+asv.tab.16s.2019_roots<-subset(asv.tab.16s.2019,row.names(asv.tab.16s.2019)%in%metadata_burn_roots_16s$Sample)
+
+# Converting ASV table data to numeric
+asv.tab.16s.2019_roots_2<-apply(asv.tab.16s.2019_roots, 2, as.numeric)
+
+# Convering row names to sample names
+row.names(asv.tab.16s.2019_roots_2)<-make.names(row.names(asv.tab.16s.2019_roots_2))
+
+# Removing "X" from row names as a product of sample names starting numerically.
+row.names(asv.tab.16s.2019_roots_2)<-sub("X","",row.names(asv.tab.16s.2019_roots_2))
+
+# Removing ASVs that have columns sums of 0. 
+asv.tab.16s.2019_rootsonly<-asv.tab.16s.2019_roots_2[,-which((colSums(asv.tab.16s.2019_roots_2)==0))]
+
+# Adding a pseudo count of 1 to root data for deseq analysis.
+asv.tab.16s.2019_rootsonly_pseudo<-asv.tab.16s.2019_rootsonly+1
+
+# Creating a deseq object
+deseq_obj <- DESeqDataSetFromMatrix(countData = t(asv.tab.16s.2019_rootsonly_pseudo),
+                              colData = metadata_burn_roots_16s,
+                              design = ~ Treatment)
+deseq_obj
+
+
+# Removing ASVs with less than 10 occurrences across  all samples..
+deseq_obj_pass <- which(rowSums(counts(deseq_obj)) >= 10)
+deseq_obj_filt <- deseq_obj[deseq_obj_pass,]
+
+# Using deseq to identify differentially  abundant ASVs in root samples. 
+
+deseq_output <- DESeq(deseq_obj_filt)
+
+# Viewing results of deseq analysis with results function.
+results_deseq<-results(deseq_output)
+
+# Setting contrasts to compare prescribed  burn to  control  treatments.
+contrast<-c("Treatment","Prescribed Burn","Control")
+results_deseq<-results(deseq_output, contrast = contrast, alpha = 0.01)
+
+# Pulling out only ASVs with signficance at alpha of 0.05 for adjusted pvalues. 
+results_deseq_sub<-as.data.frame(results_deseq[which(results_deseq$padj < 0.05),])
+
+# Merging taxonomy info with results data
+deseq_tax<-merge(asv_taxonomy.16s,results_deseq_sub,by=0)
+
+
+#write.table(deseq_tax,file="/Volumes/Beant_Kapoor/Kapoor et al. 2021_Dogwwod Microbiome Manuscript_forest ecology/deseq_2_results.txt",sep='\t',col.names=TRUE,row.names = TRUE)
+```
+
+## Acidothermus and Isosphaeraceae Tests
+```{r}
+# Importing asv table with taxonomy informaiton
+t.seqtab.tax.16s<-read.table('/Volumes/Beant_Kapoor/sequence_processing/raw_sequence_data_bac_dwdmcb/t.seqtab.tax.16s.txt',header=TRUE,sep='\t')
+
+# Removing spaces from sample names and adding "."
+row.names(t.seqtab.tax.16s)<-sub(' ','.',row.names(t.seqtab.tax.16s))
+
+# Subsetting taxonomy information. 
+asv_taxonomy<-data.frame(t.seqtab.tax.16s[,101:107])
+
+# Calculating ASV relative abundance for roots.
+relabund.asv.tab.16s.2019_roots<-decostand(roots.met.rareasv.16s.2019[,6:length(roots.met.rareasv.16s.2019)],method="total")
+
+# Converting row names to sample names. 
+row.names(relabund.asv.tab.16s.2019_roots)<-make.names(roots.met.rareasv.16s.2019$Sample)
+
+# Removing "X" from row names as a product of sample names starting numerically.
+rownames(relabund.asv.tab.16s.2019_roots)<-sub("X","",rownames(relabund.asv.tab.16s.2019_roots))
+
+# Transposing ASV table.
+t.asv.tab.16s.2019_roots<-t(relabund.asv.tab.16s.2019_roots)
+
+# Merging ASV table with taxonomy information.
+t.seqtab.tax.16s_roots<-merge(t.asv.tab.16s.2019_roots,asv_taxonomy,by=0)
+
+# Using grep to pull out Acidothermus ASVs
+t.seqtab.tax.16s_roots_acidothermus<-t.seqtab.tax.16s_roots[grep("Acidothermus",t.seqtab.tax.16s_roots$Genus),]
+
+# Transposing ASV table and subsetting to include only relative abundance data
+seqtab.tax.16s_roots_acidothermus<-t(t.seqtab.tax.16s_roots_acidothermus[,1:21])
+
+# Converting column names to asv numbers
+colnames(seqtab.tax.16s_roots_acidothermus)<-make.names(seqtab.tax.16s_roots_acidothermus[1,])
+
+# Removing first row which is now duplicate with column names
+seqtab.tax.16s_roots_acidothermus<-seqtab.tax.16s_roots_acidothermus[-1,]
+
+# Converting data to data frame
+seqtab.tax.16s_roots_acidothermus.2<-as.data.frame(seqtab.tax.16s_roots_acidothermus)
+
+# Converting data to numeric
+seqtab.tax.16s_roots_acidothermus.3<-apply(seqtab.tax.16s_roots_acidothermus.2, 2, as.numeric)
+
+# Converting row names to sample names. 
+rownames(seqtab.tax.16s_roots_acidothermus.3)<-make.names(row.names(seqtab.tax.16s_roots_acidothermus.2))
+
+# Removing "X" from row names as a product of sample names starting numerically.
+rownames(seqtab.tax.16s_roots_acidothermus.3)<-sub("X","",rownames(seqtab.tax.16s_roots_acidothermus.3))
+
+# Merging ASV table with metadata
+seqtab.tax.16s_roots_acidothermus_meta<-merge(metadata_burn_roots_16s,seqtab.tax.16s_roots_acidothermus.3,by.x="Sample",by.y=0)
+
+# Calculating acidothermus relative abundance per sample
+seqtab.tax.16s_roots_acidothermus_meta$acidothermus<-rowSums(seqtab.tax.16s_roots_acidothermus_meta[,6:156])
+
+# Plotting in ggplot
+acidothermus_roots_2019<-ggplot(seqtab.tax.16s_roots_acidothermus_meta, aes(x=Treatment, y=acidothermus, outlier.shape=NA,color=Treatment))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_point(position = position_jitterdodge())+
+  scale_color_manual(values=c("#00BFC4","#F8766D"))+
+  xlab("Treatment")+
+  ylab(bquote("Relative Abundance"))+
+  theme(panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+    panel.border=element_rect(colour="black", size=1, fill=NA))+
+  theme(panel.grid.major=element_blank(),
+       panel.grid.minor=element_blank(),
+       panel.background = element_blank(),
+  panel.border=element_rect(color="black", size=1, fill=NA))+
+  geom_text(data=NULL,aes(x=1,y=0.5,label="A"),color="black")+
+  geom_text(data=NULL,aes(x=2,y=0.5,label="B"),color="black")
+
+acidothermus_roots_2019
+
+# Performing t.test on acidothermus relative abundance by treatment
+t.test(acidothermus~Treatment,data=seqtab.tax.16s_roots_acidothermus_meta,)
+
+# Testing model assumptions
+shapiro.test((seqtab.tax.16s_roots_acidothermus_meta$acidothermus))
+leveneTest((seqtab.tax.16s_roots_acidothermus_meta$acidothermus),group =seqtab.tax.16s_roots_acidothermus_meta$Treatment)
+
+
+# Isosphaeraceae
+
+# Using grep to pull out isosphaeraceae ASVs
+t.seqtab.tax.16s_roots_isosphaeraceae<-t.seqtab.tax.16s_roots[grep("Isosphaeraceae",t.seqtab.tax.16s_roots$Family),]
+
+# Transposing ASV table and subsetting to include only relative abundance data
+seqtab.tax.16s_roots_isosphaeraceae<-t(t.seqtab.tax.16s_roots_isosphaeraceae[,1:21])
+
+# Converting column names to asv numbers
+colnames(seqtab.tax.16s_roots_isosphaeraceae)<-make.names(seqtab.tax.16s_roots_isosphaeraceae[1,])
+
+# Removing first row which is now duplicate with column names
+seqtab.tax.16s_roots_isosphaeraceae<-seqtab.tax.16s_roots_isosphaeraceae[-1,]
+
+# Converting data to data frame
+seqtab.tax.16s_roots_isosphaeraceae.2<-as.data.frame(seqtab.tax.16s_roots_isosphaeraceae)
+
+# Converting data to numeric
+seqtab.tax.16s_roots_isosphaeraceae.3<-apply(seqtab.tax.16s_roots_isosphaeraceae.2, 2, as.numeric)
+
+# Converting row names to sample names. 
+rownames(seqtab.tax.16s_roots_isosphaeraceae.3)<-make.names(row.names(seqtab.tax.16s_roots_isosphaeraceae.2))
+
+# Removing "X" from row names as a product of sample names starting numerically.
+rownames(seqtab.tax.16s_roots_isosphaeraceae.3)<-sub("X","",rownames(seqtab.tax.16s_roots_isosphaeraceae.3))
+
+# Merging ASV table with metadata
+seqtab.tax.16s_roots_isosphaeraceae_meta<-merge(metadata_burn_roots_16s,seqtab.tax.16s_roots_isosphaeraceae.3,by.x="Sample",by.y=0)
+
+# Calculating isosphaeraceae relative abundance per sample
+seqtab.tax.16s_roots_isosphaeraceae_meta$isosphaeraceae<-rowSums(seqtab.tax.16s_roots_isosphaeraceae_meta[,6:117])
+
+# Plotting in ggplot
+isosphaeraceae_roots_2019<-ggplot(seqtab.tax.16s_roots_isosphaeraceae_meta, aes(x=Treatment, y=isosphaeraceae, outlier.shape=NA,color=Treatment))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_point(position = position_jitterdodge())+
+  scale_color_manual(values=c("#00BFC4","#F8766D"))+
+  xlab("Treatment")+
+  ylab(bquote("Relative Abundance"))+
+  theme(panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+    panel.border=element_rect(colour="black", size=1, fill=NA))+
+  theme(panel.grid.major=element_blank(),
+       panel.grid.minor=element_blank(),
+       panel.background = element_blank(),
+  panel.border=element_rect(color="black", size=1, fill=NA))+
+  geom_text(data=NULL,aes(x=1,y=0.10,label="A"),color="black")+
+  geom_text(data=NULL,aes(x=2,y=0.10,label="B"),color="black")
+
+isosphaeraceae_roots_2019
+
+# Performing t.test on acidothermus relative abundance by treatment
+t.test(sqrt(isosphaeraceae)~Treatment,data=seqtab.tax.16s_roots_isosphaeraceae_meta)
+
+# Testing model assumptions
+shapiro.test(sqrt(seqtab.tax.16s_roots_isosphaeraceae_meta$isosphaeraceae))
+leveneTest(sqrt(seqtab.tax.16s_roots_isosphaeraceae_meta$isosphaeraceae),group =seqtab.tax.16s_roots_isosphaeraceae_meta$Treatment)
+
+```
+
+# Relative abundance charts
+
+
+## Fungal Soil Phyla
+
+```{r}
+# Importingmerged ASV and taxonomy table 
+taxonomy_table_rare_soil_its<-taxonomy_formatting(rare.asv.tab.its.2019.soil,asv_taxonomy.its)
+
+# Creating a new talbe that contains only phyla and asv counts
+t.raretabtax.asv.its.soil<-data.frame(taxonomy_table_rare_soil_its$Phylum,taxonomy_table_rare_soil_its[,2:(length(taxonomy_table_rare_soil_its)-7)])
+
+# Conducting col wise sums by phylum
+t.raretabtax.asv.its.soil<-as.data.frame(ddply(t.raretabtax.asv.its.soil, .(taxonomy_table_rare_soil_its.Phylum),colwise(sum)))
+
+# Making phylum the row name
+rownames(t.raretabtax.asv.its.soil)<-make.names(t.raretabtax.asv.its.soil$taxonomy_table_rare_soil_its.Phylum)
+
+# Removing phylum column
+t.raretabtax.asv.its.soil<-t.raretabtax.asv.its.soil[,2:length(t.raretabtax.asv.its.soil)]
+
+# Transposing data frame
+raretabtax.asv.its.soil<-as.data.frame(t(t.raretabtax.asv.its.soil))
+
+# Removing X's from row names
+rownames(raretabtax.asv.its.soil)<-sub("X","",rownames(raretabtax.asv.its.soil))
+
+# Merging metadata with abundance data
+raretabtax.asv.meta.its.soil<-merge(met.rare.its.2019.soil,raretabtax.asv.its.soil,by.x="Sample",by.y=0)
+
+# Subsetting so tht only treatment information and asv counts are included..
+raretabtax.asv.grouping.its.soil<-data.frame(Treatment=raretabtax.asv.meta.its.soil$Treatment,raretabtax.asv.meta.its.soil[,6:length(raretabtax.asv.meta.its.soil)])
+
+# Calculating treatment wise abundance
+raretabtax.asv.groupsum.its.soil<-ddply(raretabtax.asv.grouping.its.soil,.(Treatment),colwise(sum))
+
+# Making treatment ID the row name
+row.names(raretabtax.asv.groupsum.its.soil)<-make.names(raretabtax.asv.groupsum.its.soil$Treatment)
+
+# Creating a new table that is just abundance data
+taxcols.asv.its.soil<-raretabtax.asv.groupsum.its.soil[,2:length(raretabtax.asv.groupsum.its.soil)]
+
+# Subsetting out phyla that make up less than 1% of community
+taxoth.asv.its.soil<-taxcols.asv.its.soil[,colSums(taxcols.asv.its.soil)/sum(taxcols.asv.its.soil)<=0.01]
+
+# Creating an object that consists of phyla that comprise only 1% of community. 
+taxOthers.asv.its.soil<-data.frame(Other=rowSums(taxoth.asv.its.soil))
+  
+# Creating an object for phyla that comprise more than 1% of community. 
+taxreg.asv.its.soil<-taxcols.asv.its.soil[,colSums(taxcols.asv.its.soil)/sum(taxcols.asv.its.soil)>0.01]
+
+# Merging others into more abundant phyla
+taxtot2.asv.its.soil<-merge(taxreg.asv.its.soil,taxOthers.asv.its.soil,by=0)
+
+# Removing X's from row names
+taxtot2.asv.its.soil$Row.names<-sub("X",'',taxtot2.asv.its.soil$Row.names)
+
+# Calculating phyla relative abundances
+taxrelabund.asv.its.soil<-data.frame(Treatment=taxtot2.asv.its.soil[,1],decostand(taxtot2.asv.its.soil[,2:length(taxtot2.asv.its.soil)],method="total"))
+
+# Converting phyla data to long format
+taxrelabundmelt.asv.its.soil<-gather(taxrelabund.asv.its.soil,phylum,relative_abundance.its.soil,2:length(taxrelabund.asv.its.soil),factor_key = TRUE)
+
+# Converting relative abundance data to numeric
+taxrelabundmelt.asv.its.soil$relative_abundance<-as.numeric(taxrelabundmelt.asv.its.soil$relative_abundance)
+
+# Converting treatment to a character
+taxrelabundmelt.asv.its.soil$Treatment<-as.character(taxrelabundmelt.asv.its.soil$Treatment)
+
+# Removing period for treatment names
+taxrelabundmelt.asv.its.soil$Treatment<-sub("Prescribed.Burn","Prescribed Burn",taxrelabundmelt.asv.its.soil$Treatment)
+
+# Plotting bar charts with ggplot
+taxrel.asv.its.soil<-ggplot(taxrelabundmelt.asv.its.soil, aes(x=Treatment, y=relative_abundance, fill=phylum))+
+  geom_bar(stat="identity", show.legend=TRUE, color="black")+
+  xlab("Treatment") +
+  ylab("Relative Abundance") +
+  scale_fill_manual(values=c("#650CBB","#10BDCC","#2C8615","#E8B784","#A4A4A4"))+
+ theme_classic()+
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.text.x = element_text(size = 14), axis.ticks.x = element_blank(), axis.text.y = element_text(size = 14), axis.line.y.left = element_line(), axis.title.y = element_text(size = 14))+
+    guides(fill=guide_legend(title="Phylum"))+
+    geom_text(data=NULL,aes(x=0.75,y=1.1,label="Soil - Fungi",fontface="bold"),size=6)+
+  scale_y_continuous(breaks=c(0.0,0.25,0.50,0.75,1.0))+
+    theme(axis.text = element_text(face="bold"),
+  axis.title = element_text(face="bold"),legend.text=element_text(size=15),legend.title=element_text(size=15))
+taxrel.asv.its.soil
+```
+
+## Fungal Roots phyla
+
+```{r}
+# Importingmerged ASV and taxonomy table 
+taxonomy_table_rare_roots_its<-taxonomy_formatting(rare.asv.tab.its.2019.roots,asv_taxonomy.its)
+
+# Creating a new table that contains only phyla and asv counts
+t.raretabtax.asv.its.roots<-data.frame(taxonomy_table_rare_roots_its$Phylum,taxonomy_table_rare_roots_its[,2:(length(taxonomy_table_rare_roots_its)-7)])
+
+# Conducting col wise sums by phylum
+t.raretabtax.asv.its.roots<-as.data.frame(ddply(t.raretabtax.asv.its.roots, .(taxonomy_table_rare_roots_its.Phylum),colwise(sum)))
+
+# Making phylum the row name
+rownames(t.raretabtax.asv.its.roots)<-make.names(t.raretabtax.asv.its.roots$taxonomy_table_rare_roots_its.Phylum)
+
+# Removing phylum column
+t.raretabtax.asv.its.roots<-t.raretabtax.asv.its.roots[,2:length(t.raretabtax.asv.its.roots)]
+
+# Transposing data frame
+raretabtax.asv.its.roots<-as.data.frame(t(t.raretabtax.asv.its.roots))
+
+# Removing X's from row names
+rownames(raretabtax.asv.its.roots)<-sub("X","",rownames(raretabtax.asv.its.roots))
+
+# Merging metadata with abundance data
+raretabtax.asv.meta.its.roots<-merge(met.rare.its.2019.roots,raretabtax.asv.its.roots,by.x="Sample",by.y=0)
+
+# Subsetting so tht only treatment information and asv counts are included..
+raretabtax.asv.grouping.its.roots<-data.frame(Treatment=raretabtax.asv.meta.its.roots$Treatment,raretabtax.asv.meta.its.roots[,6:length(raretabtax.asv.meta.its.roots)])
+
+# Calculating treatment wise abundance
+raretabtax.asv.groupsum.its.roots<-ddply(raretabtax.asv.grouping.its.roots,.(Treatment),colwise(sum))
+
+# Making treatment ID the row name
+row.names(raretabtax.asv.groupsum.its.roots)<-make.names(raretabtax.asv.groupsum.its.roots$Treatment)
+
+# Creating a new table that is just abundance data
+taxcols.asv.its.roots<-raretabtax.asv.groupsum.its.roots[,2:length(raretabtax.asv.groupsum.its.roots)]
+
+# Subsetting out phyla that make up less than 1% of community
+taxoth.asv.its.roots<-taxcols.asv.its.roots[,colSums(taxcols.asv.its.roots)/sum(taxcols.asv.its.roots)<=0.01]
+
+# Creating an object that consists of phyla that comprise only 1% of community. 
+taxOthers.asv.its.roots<-data.frame(Other=rowSums(taxoth.asv.its.roots))
+  
+# Creating an object for phyla that comprise more than 1% of community. 
+taxreg.asv.its.roots<-taxcols.asv.its.roots[,colSums(taxcols.asv.its.roots)/sum(taxcols.asv.its.roots)>0.01]
+
+# Merging others into more abundant phyla
+taxtot2.asv.its.roots<-merge(taxreg.asv.its.roots,taxOthers.asv.its.roots,by=0)
+
+# Removing X's from row names
+taxtot2.asv.its.roots$Row.names<-sub("X",'',taxtot2.asv.its.roots$Row.names)
+
+# Calculating phyla relative abundances
+taxrelabund.asv.its.roots<-data.frame(Treatment=taxtot2.asv.its.roots[,1],decostand(taxtot2.asv.its.roots[,2:length(taxtot2.asv.its.roots)],method="total"))
+
+# Converting phyla data to long format
+taxrelabundmelt.asv.its.roots<-gather(taxrelabund.asv.its.roots,phylum,relative_abundance.its.roots,2:length(taxrelabund.asv.its.roots),factor_key = TRUE)
+
+# Converting relative abundance data to numeric
+taxrelabundmelt.asv.its.roots$relative_abundance<-as.numeric(taxrelabundmelt.asv.its.roots$relative_abundance)
+
+# Converting treatment to a character
+taxrelabundmelt.asv.its.roots$Treatment<-as.character(taxrelabundmelt.asv.its.roots$Treatment)
+
+# Removing period for treatment names
+taxrelabundmelt.asv.its.roots$Treatment<-sub("Prescribed.Burn","Prescribed Burn",taxrelabundmelt.asv.its.roots$Treatment)
+
+# Plotting bar charts with ggplot
+taxrel.asv.its.roots<-ggplot(taxrelabundmelt.asv.its.roots, aes(x=Treatment, y=relative_abundance, fill=phylum))+
+  geom_bar(stat="identity", show.legend=TRUE, color="black")+
+  xlab("Treatment") +
+  ylab("Relative Abundance") +
+  scale_fill_manual(values=c("#650CBB","#10BDCC","#2C8615","#E8B784","#A4A4A4"))+
+ theme_classic()+
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.text.x = element_text(size = 14), axis.ticks.x = element_blank(), axis.text.y = element_text(size = 14), axis.line.y.left = element_line(), axis.title.y = element_text(size = 14))+
+    guides(fill=guide_legend(title="Phylum"))+
+    geom_text(data=NULL,aes(x=0.75,y=1.1,label="roots - Fungi",fontface="bold"),size=6)+
+  scale_y_continuous(breaks=c(0.0,0.25,0.50,0.75,1.0))+
+    theme(axis.text = element_text(face="bold"),
+  axis.title = element_text(face="bold"),legend.text=element_text(size=15),legend.title=element_text(size=15))
+taxrel.asv.its.roots
+```
+
+## Fungal Bark Phyla
+```{r}
+# Importing merged ASV and taxonomy table 
+taxonomy_table_rare_bark_its<-taxonomy_formatting(rare.asv.tab.its.2019.bark,asv_taxonomy.its)
+
+# Creating a new talbe that contains only phyla and asv counts
+t.raretabtax.asv.its.bark<-data.frame(taxonomy_table_rare_bark_its$Phylum,taxonomy_table_rare_bark_its[,2:(length(taxonomy_table_rare_bark_its)-7)])
+
+# Conducting col wise sums by phylum
+t.raretabtax.asv.its.bark<-as.data.frame(ddply(t.raretabtax.asv.its.bark, .(taxonomy_table_rare_bark_its.Phylum),colwise(sum)))
+
+# Making phylum the row name
+rownames(t.raretabtax.asv.its.bark)<-make.names(t.raretabtax.asv.its.bark$taxonomy_table_rare_bark_its.Phylum)
+
+# Removing phylum column
+t.raretabtax.asv.its.bark<-t.raretabtax.asv.its.bark[,2:length(t.raretabtax.asv.its.bark)]
+
+# Transposing data frame
+raretabtax.asv.its.bark<-as.data.frame(t(t.raretabtax.asv.its.bark))
+
+# Removing X's from row names
+rownames(raretabtax.asv.its.bark)<-sub("X","",rownames(raretabtax.asv.its.bark))
+
+# Merging metadata with abundance data
+raretabtax.asv.meta.its.bark<-merge(met.rare.its.2019.bark,raretabtax.asv.its.bark,by.x="Sample",by.y=0)
+
+# Subsetting so tht only treatment information and asv counts are included..
+raretabtax.asv.grouping.its.bark<-data.frame(Treatment=raretabtax.asv.meta.its.bark$Treatment,raretabtax.asv.meta.its.bark[,6:length(raretabtax.asv.meta.its.bark)])
+
+# Calculating treatment wise abundance
+raretabtax.asv.groupsum.its.bark<-ddply(raretabtax.asv.grouping.its.bark,.(Treatment),colwise(sum))
+
+# Making treatment ID the row name
+row.names(raretabtax.asv.groupsum.its.bark)<-make.names(raretabtax.asv.groupsum.its.bark$Treatment)
+
+# Creating a new table that is just abundance data
+taxcols.asv.its.bark<-raretabtax.asv.groupsum.its.bark[,2:length(raretabtax.asv.groupsum.its.bark)]
+
+# Subsetting out phyla that make up less than 1% of community
+taxoth.asv.its.bark<-taxcols.asv.its.bark[,colSums(taxcols.asv.its.bark)/sum(taxcols.asv.its.bark)<=0.01]
+
+# Creating an object that consists of phyla that comprise only 1% of community. 
+taxOthers.asv.its.bark<-data.frame(Other=rowSums(taxoth.asv.its.bark))
+  
+# Creating an object for phyla that comprise more than 1% of community. 
+taxreg.asv.its.bark<-taxcols.asv.its.bark[,colSums(taxcols.asv.its.bark)/sum(taxcols.asv.its.bark)>0.01]
+
+# Merging others into more abundant phyla
+taxtot2.asv.its.bark<-merge(taxreg.asv.its.bark,taxOthers.asv.its.bark,by=0)
+
+# Removing X's from row names
+taxtot2.asv.its.bark$Row.names<-sub("X",'',taxtot2.asv.its.bark$Row.names)
+
+# Calculating phyla relative abundances
+taxrelabund.asv.its.bark<-data.frame(Treatment=taxtot2.asv.its.bark[,1],decostand(taxtot2.asv.its.bark[,2:length(taxtot2.asv.its.bark)],method="total"))
+
+# Converting phyla data to long format
+taxrelabundmelt.asv.its.bark<-gather(taxrelabund.asv.its.bark,phylum,relative_abundance.its.bark,2:length(taxrelabund.asv.its.bark),factor_key = TRUE)
+
+# Converting relative abundance data to numeric
+taxrelabundmelt.asv.its.bark$relative_abundance<-as.numeric(taxrelabundmelt.asv.its.bark$relative_abundance)
+
+# Converting treatment to a character
+taxrelabundmelt.asv.its.bark$Treatment<-as.character(taxrelabundmelt.asv.its.bark$Treatment)
+
+# Removing period for treatment names
+taxrelabundmelt.asv.its.bark$Treatment<-sub("Prescribed.Burn","Prescribed Burn",taxrelabundmelt.asv.its.bark$Treatment)
+
+# Plotting bar charts with ggplot
+taxrel.asv.its.bark<-ggplot(taxrelabundmelt.asv.its.bark, aes(x=Treatment, y=relative_abundance, fill=phylum))+
+  geom_bar(stat="identity", show.legend=TRUE, color="black")+
+  xlab("Treatment") +
+  ylab("Relative Abundance") +
+  scale_fill_manual(values=c("#650CBB","#10BDCC","#2C8615","#E8B784","#A4A4A4"))+
+ theme_classic()+
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.text.x = element_text(size = 14), axis.ticks.x = element_blank(), axis.text.y = element_text(size = 14), axis.line.y.left = element_line(), axis.title.y = element_text(size = 14))+
+    guides(fill=guide_legend(title="Phylum"))+
+    geom_text(data=NULL,aes(x=0.75,y=1.1,label="bark - Fungi",fontface="bold"),size=6)+
+  scale_y_continuous(breaks=c(0.0,0.25,0.50,0.75,1.0))+
+    theme(axis.text = element_text(face="bold"),
+  axis.title = element_text(face="bold"),legend.text=element_text(size=15),legend.title=element_text(size=15))
+taxrel.asv.its.bark
+```
+
+## Relative Abundance Fungal Stem
+```{r}
+# Importing merged ASV and taxonomy table 
+taxonomy_table_rare_stem_its<-taxonomy_formatting(rare.asv.tab.its.2019.stem,asv_taxonomy.its)
+
+# Creating a new talbe that contains only phyla and asv counts
+t.raretabtax.asv.its.stem<-data.frame(taxonomy_table_rare_stem_its$Phylum,taxonomy_table_rare_stem_its[,2:(length(taxonomy_table_rare_stem_its)-7)])
+
+# Conducting col wise sums by phylum
+t.raretabtax.asv.its.stem<-as.data.frame(ddply(t.raretabtax.asv.its.stem, .(taxonomy_table_rare_stem_its.Phylum),colwise(sum)))
+
+# Making phylum the row name
+rownames(t.raretabtax.asv.its.stem)<-make.names(t.raretabtax.asv.its.stem$taxonomy_table_rare_stem_its.Phylum)
+
+# Removing phylum column
+t.raretabtax.asv.its.stem<-t.raretabtax.asv.its.stem[,2:length(t.raretabtax.asv.its.stem)]
+
+# Transposing data frame
+raretabtax.asv.its.stem<-as.data.frame(t(t.raretabtax.asv.its.stem))
+
+# Removing X's from row names
+rownames(raretabtax.asv.its.stem)<-sub("X","",rownames(raretabtax.asv.its.stem))
+
+# Merging metadata with abundance data
+raretabtax.asv.meta.its.stem<-merge(met.rare.its.2019.stem,raretabtax.asv.its.stem,by.x="Sample",by.y=0)
+
+# Subsetting so tht only treatment information and asv counts are included..
+raretabtax.asv.grouping.its.stem<-data.frame(Treatment=raretabtax.asv.meta.its.stem$Treatment,raretabtax.asv.meta.its.stem[,6:length(raretabtax.asv.meta.its.stem)])
+
+# Calculating treatment wise abundance
+raretabtax.asv.groupsum.its.stem<-ddply(raretabtax.asv.grouping.its.stem,.(Treatment),colwise(sum))
+
+# Making treatment ID the row name
+row.names(raretabtax.asv.groupsum.its.stem)<-make.names(raretabtax.asv.groupsum.its.stem$Treatment)
+
+# Creating a new table that is just abundance data
+taxcols.asv.its.stem<-raretabtax.asv.groupsum.its.stem[,2:length(raretabtax.asv.groupsum.its.stem)]
+
+# Subsetting out phyla that make up less than 1% of community
+taxoth.asv.its.stem<-taxcols.asv.its.stem[,colSums(taxcols.asv.its.stem)/sum(taxcols.asv.its.stem)<=0.01]
+
+# Creating an object that consists of phyla that comprise only 1% of community. 
+taxOthers.asv.its.stem<-data.frame(Other=rowSums(taxoth.asv.its.stem))
+  
+# Creating an object for phyla that comprise more than 1% of community. 
+taxreg.asv.its.stem<-taxcols.asv.its.stem[,colSums(taxcols.asv.its.stem)/sum(taxcols.asv.its.stem)>0.01]
+
+# Merging others into more abundant phyla
+taxtot2.asv.its.stem<-merge(taxreg.asv.its.stem,taxOthers.asv.its.stem,by=0)
+
+# Removing X's from row names
+taxtot2.asv.its.stem$Row.names<-sub("X",'',taxtot2.asv.its.stem$Row.names)
+
+# Calculating phyla relative abundances
+taxrelabund.asv.its.stem<-data.frame(Treatment=taxtot2.asv.its.stem[,1],decostand(taxtot2.asv.its.stem[,2:length(taxtot2.asv.its.stem)],method="total"))
+
+# Converting phyla data to long format
+taxrelabundmelt.asv.its.stem<-gather(taxrelabund.asv.its.stem,phylum,relative_abundance.its.stem,2:length(taxrelabund.asv.its.stem),factor_key = TRUE)
+
+# Converting relative abundance data to numeric
+taxrelabundmelt.asv.its.stem$relative_abundance<-as.numeric(taxrelabundmelt.asv.its.stem$relative_abundance)
+
+# Converting treatment to a character
+taxrelabundmelt.asv.its.stem$Treatment<-as.character(taxrelabundmelt.asv.its.stem$Treatment)
+
+# Removing period for treatment names
+taxrelabundmelt.asv.its.stem$Treatment<-sub("Prescribed.Burn","Prescribed Burn",taxrelabundmelt.asv.its.stem$Treatment)
+
+# Plotting bar charts with ggplot
+taxrel.asv.its.stem<-ggplot(taxrelabundmelt.asv.its.stem, aes(x=Treatment, y=relative_abundance, fill=phylum))+
+  geom_bar(stat="identity", show.legend=TRUE, color="black")+
+  xlab("Treatment") +
+  ylab("Relative Abundance") +
+  scale_fill_manual(values=c("#650CBB","#10BDCC","#2C8615","#E8B784","#A4A4A4"))+
+ theme_classic()+
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.text.x = element_text(size = 14), axis.ticks.x = element_blank(), axis.text.y = element_text(size = 14), axis.line.y.left = element_line(), axis.title.y = element_text(size = 14))+
+    guides(fill=guide_legend(title="Phylum"))+
+    geom_text(data=NULL,aes(x=0.75,y=1.1,label="stem - Fungi",fontface="bold"),size=6)+
+  scale_y_continuous(breaks=c(0.0,0.25,0.50,0.75,1.0))+
+    theme(axis.text = element_text(face="bold"),
+  axis.title = element_text(face="bold"),legend.text=element_text(size=15),legend.title=element_text(size=15))
+taxrel.asv.its.stem
+```
+
+
+## Relative Abundance Fungal Leaves
+
+```{r}
+# Importing merged ASV and taxonomy table 
+taxonomy_table_rare_leaves_its<-taxonomy_formatting(rare.asv.tab.its.2019.leaves,asv_taxonomy.its)
+
+# Creating a new talbe that contains only phyla and asv counts
+t.raretabtax.asv.its.leaves<-data.frame(taxonomy_table_rare_leaves_its$Phylum,taxonomy_table_rare_leaves_its[,2:(length(taxonomy_table_rare_leaves_its)-7)])
+
+# Conducting col wise sums by phylum
+t.raretabtax.asv.its.leaves<-as.data.frame(ddply(t.raretabtax.asv.its.leaves, .(taxonomy_table_rare_leaves_its.Phylum),colwise(sum)))
+
+# Making phylum the row name
+rownames(t.raretabtax.asv.its.leaves)<-make.names(t.raretabtax.asv.its.leaves$taxonomy_table_rare_leaves_its.Phylum)
+
+# Removing phylum column
+t.raretabtax.asv.its.leaves<-t.raretabtax.asv.its.leaves[,2:length(t.raretabtax.asv.its.leaves)]
+
+# Transposing data frame
+raretabtax.asv.its.leaves<-as.data.frame(t(t.raretabtax.asv.its.leaves))
+
+# Removing X's from row names
+rownames(raretabtax.asv.its.leaves)<-sub("X","",rownames(raretabtax.asv.its.leaves))
+
+# Merging metadata with abundance data
+raretabtax.asv.meta.its.leaves<-merge(met.rare.its.2019.leaves,raretabtax.asv.its.leaves,by.x="Sample",by.y=0)
+
+# Subsetting so tht only treatment information and asv counts are included..
+raretabtax.asv.grouping.its.leaves<-data.frame(Treatment=raretabtax.asv.meta.its.leaves$Treatment,raretabtax.asv.meta.its.leaves[,6:length(raretabtax.asv.meta.its.leaves)])
+
+# Calculating treatment wise abundance
+raretabtax.asv.groupsum.its.leaves<-ddply(raretabtax.asv.grouping.its.leaves,.(Treatment),colwise(sum))
+
+# Making treatment ID the row name
+row.names(raretabtax.asv.groupsum.its.leaves)<-make.names(raretabtax.asv.groupsum.its.leaves$Treatment)
+
+# Creating a new table that is just abundance data
+taxcols.asv.its.leaves<-raretabtax.asv.groupsum.its.leaves[,2:length(raretabtax.asv.groupsum.its.leaves)]
+
+# Subsetting out phyla that make up less than 1% of community
+taxoth.asv.its.leaves<-taxcols.asv.its.leaves[,colSums(taxcols.asv.its.leaves)/sum(taxcols.asv.its.leaves)<=0.01]
+
+# Creating an object that consists of phyla that comprise only 1% of community. 
+taxOthers.asv.its.leaves<-data.frame(Other=rowSums(taxoth.asv.its.leaves))
+  
+# Creating an object for phyla that comprise more than 1% of community. 
+taxreg.asv.its.leaves<-taxcols.asv.its.leaves[,colSums(taxcols.asv.its.leaves)/sum(taxcols.asv.its.leaves)>0.01]
+
+# Merging others into more abundant phyla
+taxtot2.asv.its.leaves<-merge(taxreg.asv.its.leaves,taxOthers.asv.its.leaves,by=0)
+
+# Removing X's from row names
+taxtot2.asv.its.leaves$Row.names<-sub("X",'',taxtot2.asv.its.leaves$Row.names)
+
+# Calculating phyla relative abundances
+taxrelabund.asv.its.leaves<-data.frame(Treatment=taxtot2.asv.its.leaves[,1],decostand(taxtot2.asv.its.leaves[,2:length(taxtot2.asv.its.leaves)],method="total"))
+
+# Converting phyla data to long format
+taxrelabundmelt.asv.its.leaves<-gather(taxrelabund.asv.its.leaves,phylum,relative_abundance.its.leaves,2:length(taxrelabund.asv.its.leaves),factor_key = TRUE)
+
+# Converting relative abundance data to numeric
+taxrelabundmelt.asv.its.leaves$relative_abundance<-as.numeric(taxrelabundmelt.asv.its.leaves$relative_abundance)
+
+# Converting treatment to a character
+taxrelabundmelt.asv.its.leaves$Treatment<-as.character(taxrelabundmelt.asv.its.leaves$Treatment)
+
+# Removing period for treatment names
+taxrelabundmelt.asv.its.leaves$Treatment<-sub("Prescribed.Burn","Prescribed Burn",taxrelabundmelt.asv.its.leaves$Treatment)
+
+# Plotting bar charts with ggplot
+taxrel.asv.its.leaves<-ggplot(taxrelabundmelt.asv.its.leaves, aes(x=Treatment, y=relative_abundance, fill=phylum))+
+  geom_bar(stat="identity", show.legend=TRUE, color="black")+
+  xlab("Treatment") +
+  ylab("Relative Abundance") +
+  scale_fill_manual(values=c("#650CBB","#10BDCC","#2C8615","#E8B784","#A4A4A4"))+
+ theme_classic()+
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.text.x = element_text(size = 14), axis.ticks.x = element_blank(), axis.text.y = element_text(size = 14), axis.line.y.left = element_line(), axis.title.y = element_text(size = 14))+
+    guides(fill=guide_legend(title="Phylum"))+
+    geom_text(data=NULL,aes(x=0.75,y=1.1,label="leaves - Fungi",fontface="bold"),size=6)+
+  scale_y_continuous(breaks=c(0.0,0.25,0.50,0.75,1.0))+
+    theme(axis.text = element_text(face="bold"),
+  axis.title = element_text(face="bold"),legend.text=element_text(size=15),legend.title=element_text(size=15))
+taxrel.asv.its.leaves
+```
+
+
+```{r}
+# Arranging fungal phyla relative abundance plots into a single figure for publication.
+fungal_its_relabund<-ggarrange(taxrel.asv.its.roots,taxrel.asv.its.bark,taxrel.asv.its.stem,taxrel.asv.its.leaves,taxrel.asv.its.soil,nrow=3,ncol=2,labels = c("A","B","C","D","E"))
+
+#ggsave("/Volumes/Beant_Kapoor/Kapoor et al. 2021_Dogwwod Microbiome Manuscript_forest ecology/fungal_its_relabund.tiff",height=18,width=15,fungal_its_relabund,dpi=300,bg='white')
+
+```
+
+## Bacteria Soil Phyla
+
+```{r}
+# Importing merged ASV and taxonomy table 
+taxonomy_table_rare_soil_16s<-taxonomy_formatting(rare.asv.tab.16s.2019.soil,asv_taxonomy)
+
+# Creating a new talbe that contains only phyla and asv counts
+t.raretabtax.asv.16s.soil<-data.frame(taxonomy_table_rare_soil_16s$Phylum,taxonomy_table_rare_soil_16s[,2:(length(taxonomy_table_rare_soil_16s)-7)])
+
+# Conducting col wise sums by phylum
+t.raretabtax.asv.16s.soil<-as.data.frame(ddply(t.raretabtax.asv.16s.soil, .(taxonomy_table_rare_soil_16s.Phylum),colwise(sum)))
+
+# Making phylum the row name
+rownames(t.raretabtax.asv.16s.soil)<-make.names(t.raretabtax.asv.16s.soil$taxonomy_table_rare_soil_16s.Phylum)
+
+# Removing phylum column
+t.raretabtax.asv.16s.soil<-t.raretabtax.asv.16s.soil[,2:length(t.raretabtax.asv.16s.soil)]
+
+# Transposing data frame
+raretabtax.asv.16s.soil<-as.data.frame(t(t.raretabtax.asv.16s.soil))
+
+# Removing X's from row names
+rownames(raretabtax.asv.16s.soil)<-sub("X","",rownames(raretabtax.asv.16s.soil))
+
+# Merging metadata with abundance data
+raretabtax.asv.meta.16s.soil<-merge(met.rare.16s.2019.soil,raretabtax.asv.16s.soil,by.x="Sample",by.y=0)
+
+# Subsetting so tht only treatment information and asv counts are included.
+raretabtax.asv.grouping.16s.soil<-data.frame(Treatment=raretabtax.asv.meta.16s.soil$Treatment,raretabtax.asv.meta.16s.soil[,6:length(raretabtax.asv.meta.16s.soil)])
+
+# Calculating treatment wise abundance
+raretabtax.asv.groupsum.16s.soil<-ddply(raretabtax.asv.grouping.16s.soil,.(Treatment),colwise(sum))
+
+# Making treatment ID the row name
+row.names(raretabtax.asv.groupsum.16s.soil)<-make.names(raretabtax.asv.groupsum.16s.soil$Treatment)
+
+# Creating a new table that is just abundance data
+taxcols.asv.16s.soil<-raretabtax.asv.groupsum.16s.soil[,2:length(raretabtax.asv.groupsum.16s.soil)]
+
+# Subsetting out phyla that make up less than 1% of community
+taxoth.asv.16s.soil<-taxcols.asv.16s.soil[,colSums(taxcols.asv.16s.soil)/sum(taxcols.asv.16s.soil)<=0.01]
+
+# Creating an object that consists of phyla that comprise only 1% of community. 
+taxOthers.asv.16s.soil<-data.frame(Other=rowSums(taxoth.asv.16s.soil))
+  
+# Creating an object for phyla that comprise more than 1% of community. 
+taxreg.asv.16s.soil<-taxcols.asv.16s.soil[,colSums(taxcols.asv.16s.soil)/sum(taxcols.asv.16s.soil)>0.01]
+
+# Merging others into more abundant phyla
+taxtot2.asv.16s.soil<-merge(taxreg.asv.16s.soil,taxOthers.asv.16s.soil,by=0)
+
+# Removing X's from row names
+taxtot2.asv.16s.soil$Row.names<-sub("X",'',taxtot2.asv.16s.soil$Row.names)
+
+# Calculating phyla relative abundances
+taxrelabund.asv.16s.soil<-data.frame(Treatment=taxtot2.asv.16s.soil[,1],decostand(taxtot2.asv.16s.soil[,2:length(taxtot2.asv.16s.soil)],method="total"))
+
+# Converting phyla data to long format
+taxrelabundmelt.asv.16s.soil<-gather(taxrelabund.asv.16s.soil,phylum,relative_abundance.16s.soil,2:length(taxrelabund.asv.16s.soil),factor_key = TRUE)
+
+# Converting relative abundance data to numeric
+taxrelabundmelt.asv.16s.soil$relative_abundance<-as.numeric(taxrelabundmelt.asv.16s.soil$relative_abundance)
+
+# Converting treatment to a character
+taxrelabundmelt.asv.16s.soil$Treatment<-as.character(taxrelabundmelt.asv.16s.soil$Treatment)
+
+# Plotting bar charts with ggplot
+taxrel.asv.16s.soil<-ggplot(taxrelabundmelt.asv.16s.soil, aes(x=Treatment, y=relative_abundance, fill=phylum))+
+  geom_bar(stat="identity", show.legend=TRUE, color="black")+
+  xlab("Treatment") +
+  ylab("Relative Abundance") +
+  scale_fill_manual(values=c("#BB0C16","#F9948E","#29A7A7","#036B28","#BF8DDE","#E4B4EA","#C5DCDB","#A4A4A4"))+
+ theme_classic()+
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.text.x = element_text(size = 14), axis.ticks.x = element_blank(), axis.text.y = element_text(size = 14), axis.line.y.left = element_line(), axis.title.y = element_text(size = 14))+
+    guides(fill=guide_legend(title="Phylum"))+
+    geom_text(data=NULL,aes(x=1.2,y=1.1,label="Soil - Bacteria/Archaea",fontface="bold"),size=6)+
+  scale_y_continuous(breaks=c(0.0,0.25,0.50,0.75,1.0))+
+     theme(axis.text = element_text(face="bold"),
+  axis.title = element_text(face="bold"),legend.text=element_text(size=15),legend.title=element_text(size=15))
+taxrel.asv.16s.soil
+```
+
+## Bacteria Bark Phyla
+
+```{r}
+# Importing merged ASV and taxonomy table 
+taxonomy_table_rare_bark_16s<-taxonomy_formatting(rare.asv.tab.16s.2019.bark,asv_taxonomy)
+
+# Creating a new talbe that contains only phyla and asv counts
+t.raretabtax.asv.16s.bark<-data.frame(taxonomy_table_rare_bark_16s$Phylum,taxonomy_table_rare_bark_16s[,2:(length(taxonomy_table_rare_bark_16s)-7)])
+
+# Conducting col wise sums by phylum
+t.raretabtax.asv.16s.bark<-as.data.frame(ddply(t.raretabtax.asv.16s.bark, .(taxonomy_table_rare_bark_16s.Phylum),colwise(sum)))
+
+# Making phylum the row name
+rownames(t.raretabtax.asv.16s.bark)<-make.names(t.raretabtax.asv.16s.bark$taxonomy_table_rare_bark_16s.Phylum)
+
+# Removing phylum column
+t.raretabtax.asv.16s.bark<-t.raretabtax.asv.16s.bark[,2:length(t.raretabtax.asv.16s.bark)]
+
+# Transposing data frame
+raretabtax.asv.16s.bark<-as.data.frame(t(t.raretabtax.asv.16s.bark))
+
+# Removing X's from row names
+rownames(raretabtax.asv.16s.bark)<-sub("X","",rownames(raretabtax.asv.16s.bark))
+
+# Merging metadata with abundance data
+raretabtax.asv.meta.16s.bark<-merge(met.rare.16s.2019.bark,raretabtax.asv.16s.bark,by.x="Sample",by.y=0)
+
+# Subsetting so tht only treatment information and asv counts are included.
+raretabtax.asv.grouping.16s.bark<-data.frame(Treatment=raretabtax.asv.meta.16s.bark$Treatment,raretabtax.asv.meta.16s.bark[,6:length(raretabtax.asv.meta.16s.bark)])
+
+# Calculating treatment wise abundance
+raretabtax.asv.groupsum.16s.bark<-ddply(raretabtax.asv.grouping.16s.bark,.(Treatment),colwise(sum))
+
+# Making treatment ID the row name
+row.names(raretabtax.asv.groupsum.16s.bark)<-make.names(raretabtax.asv.groupsum.16s.bark$Treatment)
+
+# Creating a new table that is just abundance data
+taxcols.asv.16s.bark<-raretabtax.asv.groupsum.16s.bark[,2:length(raretabtax.asv.groupsum.16s.bark)]
+
+# Subsetting out phyla that make up less than 1% of community
+taxoth.asv.16s.bark<-taxcols.asv.16s.bark[,colSums(taxcols.asv.16s.bark)/sum(taxcols.asv.16s.bark)<=0.01]
+
+# Creating an object that consists of phyla that comprise only 1% of community. 
+taxOthers.asv.16s.bark<-data.frame(Other=rowSums(taxoth.asv.16s.bark))
+  
+# Creating an object for phyla that comprise more than 1% of community. 
+taxreg.asv.16s.bark<-taxcols.asv.16s.bark[,colSums(taxcols.asv.16s.bark)/sum(taxcols.asv.16s.bark)>0.01]
+
+# Merging others into more abundant phyla
+taxtot2.asv.16s.bark<-merge(taxreg.asv.16s.bark,taxOthers.asv.16s.bark,by=0)
+
+# Removing X's from row names
+taxtot2.asv.16s.bark$Row.names<-sub("X",'',taxtot2.asv.16s.bark$Row.names)
+
+# Calculating phyla relative abundances
+taxrelabund.asv.16s.bark<-data.frame(Treatment=taxtot2.asv.16s.bark[,1],decostand(taxtot2.asv.16s.bark[,2:length(taxtot2.asv.16s.bark)],method="total"))
+
+# Converting phyla data to long format
+taxrelabundmelt.asv.16s.bark<-gather(taxrelabund.asv.16s.bark,phylum,relative_abundance.16s.bark,2:length(taxrelabund.asv.16s.bark),factor_key = TRUE)
+
+# Converting relative abundance data to numeric
+taxrelabundmelt.asv.16s.bark$relative_abundance<-as.numeric(taxrelabundmelt.asv.16s.bark$relative_abundance)
+
+# Converting treatment to a character
+taxrelabundmelt.asv.16s.bark$Treatment<-as.character(taxrelabundmelt.asv.16s.bark$Treatment)
+
+# Plotting bar charts with ggplot
+taxrel.asv.16s.bark<-ggplot(taxrelabundmelt.asv.16s.bark, aes(x=Treatment, y=relative_abundance, fill=phylum))+
+  geom_bar(stat="identity", show.legend=TRUE, color="black")+
+  xlab("Treatment") +
+  ylab("Relative Abundance") +
+  scale_fill_manual(values=c("#BB0C16","#F9948E","#1378CC","#29A7A7","#036B28","#5CC118","#A7E07C","#700696","#BF8DDE","#E4B4EA","#C5DCDB","#A4A4A4"))+
+ theme_classic()+
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.text.x = element_text(size = 14), axis.ticks.x = element_blank(), axis.text.y = element_text(size = 14), axis.line.y.left = element_line(), axis.title.y = element_text(size = 14))+
+    guides(fill=guide_legend(title="Phylum"))+
+    geom_text(data=NULL,aes(x=1.2,y=1.1,label="bark - Bacteria/Archaea",fontface="bold"),size=6)+
+  scale_y_continuous(breaks=c(0.0,0.25,0.50,0.75,1.0))+
+     theme(axis.text = element_text(face="bold"),
+  axis.title = element_text(face="bold"),legend.text=element_text(size=15),legend.title=element_text(size=15))
+taxrel.asv.16s.bark
+```
+
+# Bacteria Roots Phyla
+
+```{r}
+
+# Importing merged ASV and taxonomy table 
+taxonomy_table_rare_roots_16s<-taxonomy_formatting(rare.asv.tab.16s.2019.roots,asv_taxonomy)
+
+# Creating a new talbe that contains only phyla and asv counts
+t.raretabtax.asv.16s.roots<-data.frame(taxonomy_table_rare_roots_16s$Phylum,taxonomy_table_rare_roots_16s[,2:(length(taxonomy_table_rare_roots_16s)-7)])
+
+# Conducting col wise sums by phylum
+t.raretabtax.asv.16s.roots<-as.data.frame(ddply(t.raretabtax.asv.16s.roots, .(taxonomy_table_rare_roots_16s.Phylum),colwise(sum)))
+
+# Making phylum the row name
+rownames(t.raretabtax.asv.16s.roots)<-make.names(t.raretabtax.asv.16s.roots$taxonomy_table_rare_roots_16s.Phylum)
+
+# Removing phylum column
+t.raretabtax.asv.16s.roots<-t.raretabtax.asv.16s.roots[,2:length(t.raretabtax.asv.16s.roots)]
+
+# Transposing data frame
+raretabtax.asv.16s.roots<-as.data.frame(t(t.raretabtax.asv.16s.roots))
+
+# Removing X's from row names
+rownames(raretabtax.asv.16s.roots)<-sub("X","",rownames(raretabtax.asv.16s.roots))
+
+# Merging metadata with abundance data
+raretabtax.asv.meta.16s.roots<-merge(met.rare.16s.2019.roots,raretabtax.asv.16s.roots,by.x="Sample",by.y=0)
+
+# Subsetting so tht only treatment information and asv counts are included.
+raretabtax.asv.grouping.16s.roots<-data.frame(Treatment=raretabtax.asv.meta.16s.roots$Treatment,raretabtax.asv.meta.16s.roots[,6:length(raretabtax.asv.meta.16s.roots)])
+
+# Calculating treatment wise abundance
+raretabtax.asv.groupsum.16s.roots<-ddply(raretabtax.asv.grouping.16s.roots,.(Treatment),colwise(sum))
+
+# Making treatment ID the row name
+row.names(raretabtax.asv.groupsum.16s.roots)<-make.names(raretabtax.asv.groupsum.16s.roots$Treatment)
+
+# Creating a new table that is just abundance data
+taxcols.asv.16s.roots<-raretabtax.asv.groupsum.16s.roots[,2:length(raretabtax.asv.groupsum.16s.roots)]
+
+# Subsetting out phyla that make up less than 1% of community
+taxoth.asv.16s.roots<-taxcols.asv.16s.roots[,colSums(taxcols.asv.16s.roots)/sum(taxcols.asv.16s.roots)<=0.01]
+
+# Creating an object that consists of phyla that comprise only 1% of community. 
+taxOthers.asv.16s.roots<-data.frame(Other=rowSums(taxoth.asv.16s.roots))
+  
+# Creating an object for phyla that comprise more than 1% of community. 
+taxreg.asv.16s.roots<-taxcols.asv.16s.roots[,colSums(taxcols.asv.16s.roots)/sum(taxcols.asv.16s.roots)>0.01]
+
+# Merging others into more abundant phyla
+taxtot2.asv.16s.roots<-merge(taxreg.asv.16s.roots,taxOthers.asv.16s.roots,by=0)
+
+# Removing X's from row names
+taxtot2.asv.16s.roots$Row.names<-sub("X",'',taxtot2.asv.16s.roots$Row.names)
+
+# Calculating phyla relative abundances
+taxrelabund.asv.16s.roots<-data.frame(Treatment=taxtot2.asv.16s.roots[,1],decostand(taxtot2.asv.16s.roots[,2:length(taxtot2.asv.16s.roots)],method="total"))
+
+# Converting phyla data to long format
+taxrelabundmelt.asv.16s.roots<-gather(taxrelabund.asv.16s.roots,phylum,relative_abundance.16s.roots,2:length(taxrelabund.asv.16s.roots),factor_key = TRUE)
+
+# Converting relative abundance data to numeric
+taxrelabundmelt.asv.16s.roots$relative_abundance<-as.numeric(taxrelabundmelt.asv.16s.roots$relative_abundance)
+
+# Converting treatment to a character
+taxrelabundmelt.asv.16s.roots$Treatment<-as.character(taxrelabundmelt.asv.16s.roots$Treatment)
+
+# Plotting bar charts with ggplot
+taxrel.asv.16s.roots<-ggplot(taxrelabundmelt.asv.16s.roots, aes(x=Treatment, y=relative_abundance, fill=phylum))+
+  geom_bar(stat="identity", show.legend=TRUE, color="black")+
+  xlab("Treatment") +
+  ylab("Relative Abundance") +
+ scale_fill_manual(values=c("#BB0C16","#F9948E","#29A7A7","#036B28","#CBE2B9","#BF8DDE","#E4B4EA","#C5DCDB","#A4A4A4"))+
+ theme_classic()+
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.text.x = element_text(size = 14), axis.ticks.x = element_blank(), axis.text.y = element_text(size = 14), axis.line.y.left = element_line(), axis.title.y = element_text(size = 14))+
+    guides(fill=guide_legend(title="Phylum"))+
+    geom_text(data=NULL,aes(x=1.2,y=1.1,label="roots - Bacteria/Archaea",fontface="bold"),size=6)+
+  scale_y_continuous(breaks=c(0.0,0.25,0.50,0.75,1.0))+
+     theme(axis.text = element_text(face="bold"),
+  axis.title = element_text(face="bold"),legend.text=element_text(size=15),legend.title=element_text(size=15))
+taxrel.asv.16s.roots
+```
+
+
+## Bacteria Stem Relative Abundance
+
+```{r}
+
+# Importing merged ASV and taxonomy table 
+taxonomy_table_rare_stem_16s<-taxonomy_formatting(rare.asv.tab.16s.2019.stem,asv_taxonomy)
+
+# Creating a new talbe that contains only phyla and asv counts
+t.raretabtax.asv.16s.stem<-data.frame(taxonomy_table_rare_stem_16s$Phylum,taxonomy_table_rare_stem_16s[,2:(length(taxonomy_table_rare_stem_16s)-7)])
+
+# Conducting col wise sums by phylum
+t.raretabtax.asv.16s.stem<-as.data.frame(ddply(t.raretabtax.asv.16s.stem, .(taxonomy_table_rare_stem_16s.Phylum),colwise(sum)))
+
+# Making phylum the row name
+rownames(t.raretabtax.asv.16s.stem)<-make.names(t.raretabtax.asv.16s.stem$taxonomy_table_rare_stem_16s.Phylum)
+
+# Removing phylum column
+t.raretabtax.asv.16s.stem<-t.raretabtax.asv.16s.stem[,2:length(t.raretabtax.asv.16s.stem)]
+
+# Transposing data frame
+raretabtax.asv.16s.stem<-as.data.frame(t(t.raretabtax.asv.16s.stem))
+
+# Removing X's from row names
+rownames(raretabtax.asv.16s.stem)<-sub("X","",rownames(raretabtax.asv.16s.stem))
+
+# Merging metadata with abundance data
+raretabtax.asv.meta.16s.stem<-merge(met.rare.16s.2019.stem,raretabtax.asv.16s.stem,by.x="Sample",by.y=0)
+
+# Subsetting so tht only treatment information and asv counts are included.
+raretabtax.asv.grouping.16s.stem<-data.frame(Treatment=raretabtax.asv.meta.16s.stem$Treatment,raretabtax.asv.meta.16s.stem[,6:length(raretabtax.asv.meta.16s.stem)])
+
+# Calculating treatment wise abundance
+raretabtax.asv.groupsum.16s.stem<-ddply(raretabtax.asv.grouping.16s.stem,.(Treatment),colwise(sum))
+
+# Making treatment ID the row name
+row.names(raretabtax.asv.groupsum.16s.stem)<-make.names(raretabtax.asv.groupsum.16s.stem$Treatment)
+
+# Creating a new table that is just abundance data
+taxcols.asv.16s.stem<-raretabtax.asv.groupsum.16s.stem[,2:length(raretabtax.asv.groupsum.16s.stem)]
+
+# Subsetting out phyla that make up less than 1% of community
+taxoth.asv.16s.stem<-taxcols.asv.16s.stem[,colSums(taxcols.asv.16s.stem)/sum(taxcols.asv.16s.stem)<=0.01]
+
+# Creating an object that consists of phyla that comprise only 1% of community. 
+taxOthers.asv.16s.stem<-data.frame(Other=rowSums(taxoth.asv.16s.stem))
+  
+# Creating an object for phyla that comprise more than 1% of community. 
+taxreg.asv.16s.stem<-taxcols.asv.16s.stem[,colSums(taxcols.asv.16s.stem)/sum(taxcols.asv.16s.stem)>0.01]
+
+# Merging others into more abundant phyla
+taxtot2.asv.16s.stem<-merge(taxreg.asv.16s.stem,taxOthers.asv.16s.stem,by=0)
+
+# Removing X's from row names
+taxtot2.asv.16s.stem$Row.names<-sub("X",'',taxtot2.asv.16s.stem$Row.names)
+
+# Calculating phyla relative abundances
+taxrelabund.asv.16s.stem<-data.frame(Treatment=taxtot2.asv.16s.stem[,1],decostand(taxtot2.asv.16s.stem[,2:length(taxtot2.asv.16s.stem)],method="total"))
+
+# Converting phyla data to long format
+taxrelabundmelt.asv.16s.stem<-gather(taxrelabund.asv.16s.stem,phylum,relative_abundance.16s.stem,2:length(taxrelabund.asv.16s.stem),factor_key = TRUE)
+
+# Converting relative abundance data to numeric
+taxrelabundmelt.asv.16s.stem$relative_abundance<-as.numeric(taxrelabundmelt.asv.16s.stem$relative_abundance)
+
+# Converting treatment to a character
+taxrelabundmelt.asv.16s.stem$Treatment<-as.character(taxrelabundmelt.asv.16s.stem$Treatment)
+
+# Plotting bar charts with ggplot
+taxrel.asv.16s.stem<-ggplot(taxrelabundmelt.asv.16s.stem, aes(x=Treatment, y=relative_abundance, fill=phylum))+
+  geom_bar(stat="identity", show.legend=TRUE, color="black")+
+  xlab("Treatment") +
+  ylab("Relative Abundance") +
+scale_fill_manual(values=c("#F9948E","#5CC118","#A7E07C","#E4B4EA","#A4A4A4"))+ 
+ theme_classic()+
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.text.x = element_text(size = 14), axis.ticks.x = element_blank(), axis.text.y = element_text(size = 14), axis.line.y.left = element_line(), axis.title.y = element_text(size = 14))+
+    guides(fill=guide_legend(title="Phylum"))+
+    geom_text(data=NULL,aes(x=1.2,y=1.1,label="stem - Bacteria/Archaea",fontface="bold"),size=6)+
+  scale_y_continuous(breaks=c(0.0,0.25,0.50,0.75,1.0))+
+     theme(axis.text = element_text(face="bold"),
+  axis.title = element_text(face="bold"),legend.text=element_text(size=15),legend.title=element_text(size=15))
+taxrel.asv.16s.stem
+
+```
+
+
+## Leaf bacteria relative abundance
+
+```{r}
+
+# Importing merged ASV and taxonomy table 
+taxonomy_table_rare_leaves_16s<-taxonomy_formatting(rare.asv.tab.16s.2019.leaves,asv_taxonomy)
+
+# Creating a new talbe that contains only phyla and asv counts
+t.raretabtax.asv.16s.leaves<-data.frame(taxonomy_table_rare_leaves_16s$Phylum,taxonomy_table_rare_leaves_16s[,2:(length(taxonomy_table_rare_leaves_16s)-7)])
+
+# Conducting col wise sums by phylum
+t.raretabtax.asv.16s.leaves<-as.data.frame(ddply(t.raretabtax.asv.16s.leaves, .(taxonomy_table_rare_leaves_16s.Phylum),colwise(sum)))
+
+# Making phylum the row name
+rownames(t.raretabtax.asv.16s.leaves)<-make.names(t.raretabtax.asv.16s.leaves$taxonomy_table_rare_leaves_16s.Phylum)
+
+# Removing phylum column
+t.raretabtax.asv.16s.leaves<-t.raretabtax.asv.16s.leaves[,2:length(t.raretabtax.asv.16s.leaves)]
+
+# Transposing data frame
+raretabtax.asv.16s.leaves<-as.data.frame(t(t.raretabtax.asv.16s.leaves))
+
+# Removing X's from row names
+rownames(raretabtax.asv.16s.leaves)<-sub("X","",rownames(raretabtax.asv.16s.leaves))
+
+# Merging metadata with abundance data
+raretabtax.asv.meta.16s.leaves<-merge(met.rare.16s.2019.leaves,raretabtax.asv.16s.leaves,by.x="Sample",by.y=0)
+
+# Subsetting so tht only treatment information and asv counts are included.
+raretabtax.asv.grouping.16s.leaves<-data.frame(Treatment=raretabtax.asv.meta.16s.leaves$Treatment,raretabtax.asv.meta.16s.leaves[,6:length(raretabtax.asv.meta.16s.leaves)])
+
+# Calculating treatment wise abundance
+raretabtax.asv.groupsum.16s.leaves<-ddply(raretabtax.asv.grouping.16s.leaves,.(Treatment),colwise(sum))
+
+# Making treatment ID the row name
+row.names(raretabtax.asv.groupsum.16s.leaves)<-make.names(raretabtax.asv.groupsum.16s.leaves$Treatment)
+
+# Creating a new table that is just abundance data
+taxcols.asv.16s.leaves<-raretabtax.asv.groupsum.16s.leaves[,2:length(raretabtax.asv.groupsum.16s.leaves)]
+
+# Subsetting out phyla that make up less than 1% of community
+taxoth.asv.16s.leaves<-taxcols.asv.16s.leaves[,colSums(taxcols.asv.16s.leaves)/sum(taxcols.asv.16s.leaves)<=0.01]
+
+# Creating an object that consists of phyla that comprise only 1% of community. 
+taxOthers.asv.16s.leaves<-data.frame(Other=rowSums(taxoth.asv.16s.leaves))
+  
+# Creating an object for phyla that comprise more than 1% of community. 
+taxreg.asv.16s.leaves<-taxcols.asv.16s.leaves[,colSums(taxcols.asv.16s.leaves)/sum(taxcols.asv.16s.leaves)>0.01]
+
+# Merging others into more abundant phyla
+taxtot2.asv.16s.leaves<-merge(taxreg.asv.16s.leaves,taxOthers.asv.16s.leaves,by=0)
+
+# Removing X's from row names
+taxtot2.asv.16s.leaves$Row.names<-sub("X",'',taxtot2.asv.16s.leaves$Row.names)
+
+# Calculating phyla relative abundances
+taxrelabund.asv.16s.leaves<-data.frame(Treatment=taxtot2.asv.16s.leaves[,1],decostand(taxtot2.asv.16s.leaves[,2:length(taxtot2.asv.16s.leaves)],method="total"))
+
+# Converting phyla data to long format
+taxrelabundmelt.asv.16s.leaves<-gather(taxrelabund.asv.16s.leaves,phylum,relative_abundance.16s.leaves,2:length(taxrelabund.asv.16s.leaves),factor_key = TRUE)
+
+# Converting relative abundance data to numeric
+taxrelabundmelt.asv.16s.leaves$relative_abundance<-as.numeric(taxrelabundmelt.asv.16s.leaves$relative_abundance)
+
+# Converting treatment to a character
+taxrelabundmelt.asv.16s.leaves$Treatment<-as.character(taxrelabundmelt.asv.16s.leaves$Treatment)
+
+# Plotting bar charts with ggplot
+taxrel.asv.16s.leaves<-ggplot(taxrelabundmelt.asv.16s.leaves, aes(x=Treatment, y=relative_abundance, fill=phylum))+
+  geom_bar(stat="identity", show.legend=TRUE, color="black")+
+  xlab("Treatment") +
+  ylab("Relative Abundance") +
+    scale_fill_manual(values=c("#BB0C16","#F9948E","#1378CC","#29A7A7","#A7E07C","#BF8DDE","#E4B4EA","#C5DCDB","#A4A4A4"))+
+ theme_classic()+
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.text.x = element_text(size = 14), axis.ticks.x = element_blank(), axis.text.y = element_text(size = 14), axis.line.y.left = element_line(), axis.title.y = element_text(size = 14))+
+    guides(fill=guide_legend(title="Phylum"))+
+    geom_text(data=NULL,aes(x=1.2,y=1.1,label="leaves - Bacteria/Archaea",fontface="bold"),size=6)+
+  scale_y_continuous(breaks=c(0.0,0.25,0.50,0.75,1.0))+
+     theme(axis.text = element_text(face="bold"),
+  axis.title = element_text(face="bold"),legend.text=element_text(size=15),legend.title=element_text(size=15))
+taxrel.asv.16s.leaves
+
+```
+
+```{r}
+# Organizing relative abundance charts for publication.
+relabund_bac_plots<-ggarrange(taxrel.asv.16s.roots,taxrel.asv.16s.bark,taxrel.asv.16s.stem,taxrel.asv.16s.leaves,taxrel.asv.16s.soil,nrow=3,ncol=2,labels = c("A","B","C","D","E"))
+
+#ggsave("/Volumes/Beant_Kapoor/Kapoor et al. 2021_Dogwwod Microbiome Manuscript_forest ecology/phylum_bacteria.tiff",relabund_bac_plots,width=15,height=18,dpi=300,bg="white")
+```
